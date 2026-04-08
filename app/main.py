@@ -3,6 +3,7 @@ FastAPI webapp + background sync scheduler.
 Run with: uvicorn app.main:app --reload
 """
 import os
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -22,13 +23,36 @@ SYNC_INTERVAL_MINUTES = int(os.environ.get("SYNC_INTERVAL_MINUTES", "15"))
 scheduler = BackgroundScheduler(timezone="UTC")
 templates = Jinja2Templates(directory="app/templates")
 
+# Lock ensures only one sync runs at a time, regardless of source (manual or scheduled).
+_sync_lock = threading.Lock()
+
+
+def _locked_sync(force: bool) -> bool:
+    """
+    Run a sync under the shared lock. Returns True if the sync ran, False if
+    another sync was already in progress and we skipped.
+    """
+    if not _sync_lock.acquire(blocking=False):
+        print("  sync skipped: another sync is already running")
+        return False
+    try:
+        run_sync(force=force)
+        return True
+    finally:
+        _sync_lock.release()
+
+
+def _scheduled_sync():
+    """Entry point for the APScheduler job. Never forces."""
+    _locked_sync(force=False)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     # Run sync once at startup, then on a schedule
     scheduler.add_job(
-        run_sync,
+        _scheduled_sync,
         "interval",
         minutes=SYNC_INTERVAL_MINUTES,
         next_run_time=datetime.now(timezone.utc),
@@ -95,8 +119,8 @@ def api_history():
 
 @app.post("/api/sync")
 def api_sync():
-    run_sync(force=True)
-    return {"status": "ok"}
+    ran = _locked_sync(force=True)
+    return {"status": "ok" if ran else "already_running"}
 
 
 # ---------- Dashboard ----------
@@ -129,7 +153,7 @@ def _render_dashboard(request: Request, paper: bool):
             """,
             (is_paper_flag,),
         ).fetchall()
-        
+
         positions = conn.execute(
             """
             SELECT p.*, a.name AS account_name
