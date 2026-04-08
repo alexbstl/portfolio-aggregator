@@ -5,7 +5,7 @@
     <title>Portfolio</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-               max-width: 1200px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+               max-width: 1400px; margin: 2rem auto; padding: 0 1rem; color: #222; }
         h1, h2 { font-weight: 600; }
         .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
                    gap: 1rem; margin: 1.5rem 0; }
@@ -71,6 +71,16 @@
                 ${{ "{:,.2f}".format(total_pnl) }}
             </div>
         </div>
+        <div class="card">
+            <div class="label">Day Change</div>
+            <div class="value {% if total_day_change >= 0 %}pos{% else %}neg{% endif %}">
+                {% if total_day_change is not none %}
+                    ${{ "{:,.2f}".format(total_day_change) }}
+                {% else %}
+                    &mdash;
+                {% endif %}
+            </div>
+        </div>
     </div>
 
     <h2>Accounts</h2>
@@ -104,7 +114,8 @@
         <thead>
             <tr>
                 <th>Symbol</th><th>Account</th><th>Units</th><th>Avg Price</th>
-                <th>Market Price</th><th>Market Value</th><th>Open P&L</th>
+                <th>Market Price</th><th>Market Value</th><th>Day Chg $</th>
+                <th>Day Chg %</th><th>Open P&L</th>
             </tr>
         </thead>
         <tbody>
@@ -116,6 +127,20 @@
                 <td>${{ "{:,.2f}".format(p.avg_purchase_price or 0) }}</td>
                 <td>${{ "{:,.2f}".format(p.market_price or 0) }}</td>
                 <td>${{ "{:,.2f}".format(p.market_value or 0) }}</td>
+                {% if p.day_change is not none %}
+                <td class="{% if p.day_change >= 0 %}pos{% else %}neg{% endif %}">
+                    ${{ "{:,.2f}".format(p.day_change) }}
+                </td>
+                {% else %}
+                <td>&mdash;</td>
+                {% endif %}
+                {% if p.day_change_pct is not none %}
+                <td class="{% if p.day_change_pct >= 0 %}pos{% else %}neg{% endif %}">
+                    {{ "{:+.2f}%".format(p.day_change_pct * 100) }}
+                </td>
+                {% else %}
+                <td>&mdash;</td>
+                {% endif %}
                 <td class="{% if (p.computed_pnl or 0) >= 0 %}pos{% else %}neg{% endif %}">
                     ${{ "{:,.2f}".format(p.computed_pnl or 0) }}
                 </td>

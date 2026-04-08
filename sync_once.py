@@ -90,7 +90,7 @@ def prune_orphaned(conn, live_connection_ids: set[str], live_account_ids: set[st
         print(f"  pruned {n_conn} orphaned connections")
 
 
-def run_sync(force: bool = False):
+def run_sync(force: bool = False, snapshot_kind: str | None = None):
     snapshot_at = now_iso()
     
     print(f"[{snapshot_at}] Starting sync...")
@@ -165,7 +165,8 @@ def run_sync(force: bool = False):
                 positions = []
 
             print(f"    {len(positions)} positions")
-            replace_positions(conn, acct_id, positions, snapshot_at)
+            replace_positions(conn, acct_id, positions, snapshot_at,
+                              snapshot_kind=snapshot_kind)
             insert_account_value_snapshot(conn, acct_id, snapshot_at)
 
         if should_prune:
@@ -191,9 +192,9 @@ def run_sync(force: bool = False):
             """
         ):
             print(
-                f"  {row['name']}: total={row['total_value']:.2f} cash={row['cash']:.2f} "
-                f"positions={row['n_positions']} ({row['n_long']} long / {row['n_short']} short) "
-                f"long_mv={row['long_mv']:.2f} short_mv={row['short_mv']:.2f}"
+                f"  {row['name']}: total={row['total_value'] or 0:.2f} cash={row['cash'] or 0:.2f} "
+                f"positions={row['n_positions']} ({row['n_long'] or 0} long / {row['n_short'] or 0} short) "
+                f"long_mv={row['long_mv'] or 0:.2f} short_mv={row['short_mv'] or 0:.2f}"
             )
     print("Done.")
 

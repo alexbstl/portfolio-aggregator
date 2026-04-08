@@ -88,6 +88,8 @@ CREATE TABLE IF NOT EXISTS positions (
 );
 
 -- Per-position historical snapshots. One row per (account, symbol) per sync.
+-- snapshot_kind: NULL for regular 15-min snapshots, 'pre_open' for the 9:29 ET
+-- reference snapshot used to compute daily change.
 CREATE TABLE IF NOT EXISTS position_snapshots (
     snapshot_at             TEXT NOT NULL,
     account_id              TEXT NOT NULL,
@@ -95,6 +97,7 @@ CREATE TABLE IF NOT EXISTS position_snapshots (
     units                   REAL NOT NULL,
     market_price            REAL,
     market_value            REAL,
+    snapshot_kind           TEXT,                 -- NULL | 'pre_open'
     PRIMARY KEY (snapshot_at, account_id, symbol),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
@@ -104,6 +107,9 @@ CREATE INDEX IF NOT EXISTS idx_position_snapshots_symbol
 
 CREATE INDEX IF NOT EXISTS idx_position_snapshots_account
     ON position_snapshots(account_id, snapshot_at);
+
+CREATE INDEX IF NOT EXISTS idx_position_snapshots_kind
+    ON position_snapshots(snapshot_kind, snapshot_at);
 
 -- Account-level historical snapshots for the equity curve.
 CREATE TABLE IF NOT EXISTS account_value_snapshots (
@@ -121,6 +127,16 @@ CREATE TABLE IF NOT EXISTS account_value_snapshots (
 
 def init_db():
     with db() as conn:
+        # Migration: add snapshot_kind column before running full schema
+        # (CREATE TABLE IF NOT EXISTS won't add new columns to existing tables,
+        # and the CREATE INDEX on snapshot_kind would fail without the column)
+        existing = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='position_snapshots'"
+        ).fetchone()
+        if existing:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(position_snapshots)")}
+            if "snapshot_kind" not in cols:
+                conn.execute("ALTER TABLE position_snapshots ADD COLUMN snapshot_kind TEXT")
         conn.executescript(SCHEMA)
 
 
@@ -221,10 +237,13 @@ def upsert_account(conn, account: dict, balance_row: dict | None):
     )
 
 
-def replace_positions(conn, account_id: str, positions: list[dict], snapshot_at: str):
+def replace_positions(conn, account_id: str, positions: list[dict], snapshot_at: str,
+                      snapshot_kind: str | None = None):
     """
     Overwrite the live `positions` rows for this account, AND append a row
     per position to `position_snapshots`.
+
+    snapshot_kind: None for regular syncs, 'pre_open' for the 9:29 ET reference snapshot.
     """
     # Wipe current state for this account so closed positions disappear
     conn.execute("DELETE FROM positions WHERE account_id = ?", (account_id,))
@@ -274,12 +293,47 @@ def replace_positions(conn, account_id: str, positions: list[dict], snapshot_at:
         conn.execute(
             """
             INSERT INTO position_snapshots (
-                snapshot_at, account_id, symbol, units, market_price, market_value
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                snapshot_at, account_id, symbol, units, market_price, market_value,
+                snapshot_kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(snapshot_at, account_id, symbol) DO NOTHING
             """,
-            (snapshot_at, account_id, symbol, units, price, market_value),
+            (snapshot_at, account_id, symbol, units, price, market_value,
+             snapshot_kind),
         )
+
+
+def fetch_positions_with_day_change(conn, is_paper: int) -> list[sqlite3.Row]:
+    """
+    Return all positions for real (is_paper=0) or paper (is_paper=1) accounts,
+    joined with the latest pre_open snapshot to compute day change.
+    """
+    return conn.execute(
+        """
+        WITH ref_prices AS (
+            SELECT account_id, symbol, market_price AS ref_price
+            FROM position_snapshots ps1
+            WHERE snapshot_kind = 'pre_open'
+              AND snapshot_at = (
+                SELECT MAX(snapshot_at) FROM position_snapshots ps2
+                WHERE ps2.account_id = ps1.account_id
+                  AND ps2.symbol = ps1.symbol
+                  AND ps2.snapshot_kind = 'pre_open'
+              )
+        )
+        SELECT p.*, a.name AS account_name, r.ref_price,
+          CASE WHEN r.ref_price IS NOT NULL AND p.market_price IS NOT NULL
+               THEN (p.market_price - r.ref_price) * p.units END AS day_change,
+          CASE WHEN r.ref_price IS NOT NULL AND r.ref_price != 0 AND p.market_price IS NOT NULL
+               THEN (p.market_price - r.ref_price) / r.ref_price END AS day_change_pct
+        FROM positions p
+        JOIN accounts a ON a.id = p.account_id
+        LEFT JOIN ref_prices r ON r.account_id = p.account_id AND r.symbol = p.symbol
+        WHERE a.is_paper = ?
+        ORDER BY ABS(p.market_value) DESC
+        """,
+        (is_paper,),
+    ).fetchall()
 
 
 def insert_account_value_snapshot(conn, account_id: str, snapshot_at: str):
@@ -298,6 +352,9 @@ def insert_account_value_snapshot(conn, account_id: str, snapshot_at: str):
     acct = conn.execute(
         "SELECT total_value, cash FROM accounts WHERE id = ?", (account_id,)
     ).fetchone()
+
+    if acct["total_value"] is None:
+        return  # no balance data (e.g. broker returned 500), skip snapshot
 
     conn.execute(
         """

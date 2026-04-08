@@ -11,9 +11,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
-from db import db, init_db
+from db import db, init_db, fetch_positions_with_day_change
 from sync_once import run_sync
 
 load_dotenv()
@@ -27,7 +28,7 @@ templates = Jinja2Templates(directory="app/templates")
 _sync_lock = threading.Lock()
 
 
-def _locked_sync(force: bool) -> bool:
+def _locked_sync(force: bool, snapshot_kind: str | None = None) -> bool:
     """
     Run a sync under the shared lock. Returns True if the sync ran, False if
     another sync was already in progress and we skipped.
@@ -36,15 +37,20 @@ def _locked_sync(force: bool) -> bool:
         print("  sync skipped: another sync is already running")
         return False
     try:
-        run_sync(force=force)
+        run_sync(force=force, snapshot_kind=snapshot_kind)
         return True
     finally:
         _sync_lock.release()
 
 
 def _scheduled_sync():
-    """Entry point for the APScheduler job. Never forces."""
+    """Entry point for the APScheduler interval job. Never forces."""
     _locked_sync(force=False)
+
+
+def _pre_open_sync():
+    """9:29 ET weekday job: snapshot with 'pre_open' tag for day-change reference."""
+    _locked_sync(force=False, snapshot_kind="pre_open")
 
 
 @asynccontextmanager
@@ -57,6 +63,15 @@ async def lifespan(app: FastAPI):
         minutes=SYNC_INTERVAL_MINUTES,
         next_run_time=datetime.now(timezone.utc),
         id="sync",
+        max_instances=1,
+        coalesce=True,
+    )
+    # 9:29 ET weekday snapshot for day-change reference prices
+    scheduler.add_job(
+        _pre_open_sync,
+        CronTrigger(hour=9, minute=29, day_of_week="mon-fri",
+                    timezone="America/New_York"),
+        id="pre_open_snapshot",
         max_instances=1,
         coalesce=True,
     )
@@ -91,16 +106,9 @@ def api_accounts():
 
 
 @app.get("/api/positions")
-def api_positions():
+def api_positions(paper: bool = False):
     with db() as conn:
-        rows = conn.execute(
-            """
-            SELECT p.*, a.name AS account_name
-            FROM positions p
-            JOIN accounts a ON a.id = p.account_id
-            ORDER BY ABS(p.market_value) DESC
-            """
-        ).fetchall()
+        rows = fetch_positions_with_day_change(conn, 1 if paper else 0)
     return [dict(r) for r in rows]
 
 
@@ -154,16 +162,7 @@ def _render_dashboard(request: Request, paper: bool):
             (is_paper_flag,),
         ).fetchall()
 
-        positions = conn.execute(
-            """
-            SELECT p.*, a.name AS account_name
-            FROM positions p
-            JOIN accounts a ON a.id = p.account_id
-            WHERE a.is_paper = ?
-            ORDER BY ABS(p.market_value) DESC
-            """,
-            (is_paper_flag,),
-        ).fetchall()
+        positions = fetch_positions_with_day_change(conn, is_paper_flag)
 
         totals = conn.execute(
             """
@@ -198,17 +197,21 @@ def _render_dashboard(request: Request, paper: bool):
             (is_paper_flag,),
         ).fetchone()
 
+    positions_dicts = [dict(p) for p in positions]
+    total_day_change = sum(p["day_change"] for p in positions_dicts if p.get("day_change") is not None)
+
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
             "accounts": [dict(a) for a in accounts],
-            "positions": [dict(p) for p in positions],
+            "positions": positions_dicts,
             "net_value": totals["net_value"],
             "total_cash": totals["total_cash"],
             "long_mv": long_short["long_mv"],
             "short_mv": long_short["short_mv"],
             "total_pnl": long_short["total_pnl"],
+            "total_day_change": total_day_change,
             "is_paper_view": paper,
             "last_sync": last_sync["ts"],
         },
