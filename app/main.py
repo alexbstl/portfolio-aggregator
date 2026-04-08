@@ -95,7 +95,7 @@ def api_history():
 
 @app.post("/api/sync")
 def api_sync():
-    run_sync()
+    run_sync(force=True)
     return {"status": "ok"}
 
 

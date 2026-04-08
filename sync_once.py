@@ -4,6 +4,7 @@ Run this manually for now: `python sync_once.py`
 This is the function that will eventually be called on a schedule by the webapp.
 """
 import os
+import time
 from dotenv import load_dotenv
 from snaptrade_client import SnapTrade
 
@@ -89,14 +90,36 @@ def prune_orphaned(conn, live_connection_ids: set[str], live_account_ids: set[st
         print(f"  pruned {n_conn} orphaned connections")
 
 
-def run_sync():
+def run_sync(force: bool = False):
     snapshot_at = now_iso()
+    
     print(f"[{snapshot_at}] Starting sync...")
-
+    mode = "FORCED" if force else "cached"
+    print(f"[{snapshot_at}] Starting sync ({mode})...")
+    
     init_db()
 
     print("  fetching connections...")
     connections = fetch_connections()
+
+    if force and connections:
+        print(f"  forcing broker refresh on {len(connections)} connection(s)...")
+        for c in connections:
+            cid = c["id"]
+            name = c["brokerage"]["display_name"]
+            try:
+                client.connections.refresh_brokerage_authorization(
+                    authorization_id=cid,
+                    user_id=USER_ID,
+                    user_secret=USER_SECRET,
+                )
+                print(f"    {name}: refresh requested")
+            except Exception as e:
+                print(f"    {name}: refresh error {e}")
+        # Give brokers a moment to respond before we re-fetch
+        print("  waiting 15s for brokers to respond...")
+        time.sleep(15)
+
 
     print("  fetching accounts...")
     accounts = fetch_accounts()
