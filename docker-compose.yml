@@ -1,0 +1,16 @@
+services:
+  portfolio:
+    build: .
+    container_name: portfolio-aggregator
+    restart: unless-stopped
+    # Bind to localhost only — don't expose to the network. Put behind
+    # a reverse proxy / Tailscale / SSH tunnel if you need remote access.
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/data
+    env_file:
+      - .env
+    environment:
+      - DATABASE_PATH=/data/portfolio.db
+      - SYNC_INTERVAL_MINUTES=15

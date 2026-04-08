@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+data/
+.env
+.env.example
+register.py
+connect.py
+fetch.py
+*.md
+README*
