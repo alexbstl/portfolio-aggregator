@@ -28,10 +28,22 @@ Dashboard at `http://localhost:8000`.
 ## Docker
 
 ```bash
+# Build the image
+docker build -t portfolio-aggregator .
+
+# Or use docker compose (builds + runs)
 docker compose up -d --build
+
+# View logs
+docker compose logs -f
+
+# Restart after code changes
+docker compose up -d --build --force-recreate
 ```
 
-Data persists in `./data/portfolio.db`. Binds to `127.0.0.1:8000` only — put behind Caddy/Tailscale/nginx for remote access.
+Data persists in `./data/portfolio.db` (mounted as a volume). Binds to `127.0.0.1:8000` only — put behind Caddy/Tailscale/nginx for remote access.
+
+The container includes a health check at `/health` (30s interval).
 
 ## API
 
