@@ -59,6 +59,40 @@ The container will appear in Portainer automatically if Portainer is monitoring 
 | `/api/history` | GET | Account value snapshots |
 | `/api/sync` | POST | Trigger manual sync |
 
+## SnapTrade Setup & Management
+
+These scripts manage the SnapTrade user and broker connections. Run them from the project root with your `.env` configured.
+
+```bash
+# 1. Register a SnapTrade user (once). Prints a userSecret — save it to .env.
+python register.py
+
+# 2. Generate a connection URL. Open in browser to link a brokerage.
+python connect.py
+
+# 3. List all linked connections
+python disconnect.py
+
+# 4. Disconnect a specific brokerage (removes from SnapTrade + cleans local DB, preserves snapshots)
+python disconnect.py <connection_id>
+
+# 5. Delete the SnapTrade user entirely (invalidates userSecret, removes all connections)
+python delete_user.py
+```
+
+### Debugging
+
+```bash
+# Dump raw JSON from SnapTrade (accounts, positions, balances, options)
+python fetch.py
+
+# Force all brokers to re-fetch and show updated sync timestamps
+python force_refresh.py
+
+# Check last sync timestamps for all accounts
+python check_sync.py
+```
+
 ## Project Structure
 
 ```
@@ -66,6 +100,12 @@ app/main.py          # FastAPI app, scheduler, routes
 app/templates/       # Jinja2 dashboard template
 db.py                # SQLite schema, helpers, queries
 sync_once.py         # SnapTrade sync logic
+deploy.sh            # Build and run via docker compose
 register.py          # One-time: register SnapTrade user
-connect.py           # One-time: generate connection link
+connect.py           # One-time: generate broker connection link
+disconnect.py        # List/remove broker connections
+delete_user.py       # Delete SnapTrade user entirely
+fetch.py             # Debug: dump raw SnapTrade API responses
+force_refresh.py     # Debug: force broker re-fetch
+check_sync.py        # Debug: check sync timestamps
 ```
