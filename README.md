@@ -28,10 +28,10 @@ Dashboard at `http://localhost:8000`.
 ## Docker
 
 ```bash
-# Build the image
-docker build -t portfolio-aggregator .
+# Quick deploy (build + run + health check)
+./deploy.sh
 
-# Or use docker compose (builds + runs)
+# Or manually:
 docker compose up -d --build
 
 # View logs
@@ -44,6 +44,10 @@ docker compose up -d --build --force-recreate
 Data persists in `./data/portfolio.db` (mounted as a volume). Binds to `127.0.0.1:8000` only — put behind Caddy/Tailscale/nginx for remote access.
 
 The container includes a health check at `/health` (30s interval).
+
+### Portainer
+
+The container will appear in Portainer automatically if Portainer is monitoring the Docker socket. For full lifecycle management through Portainer, add it as a Stack (Stacks → Add Stack) and point to the `docker-compose.yml`.
 
 ## API
 

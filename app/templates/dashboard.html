@@ -87,7 +87,7 @@
     <table>
         <thead>
             <tr>
-                <th>Account</th><th>Brokerage</th><th>Total</th><th>Cash</th><th>Buying Power</th>
+                <th>Account</th><th>Brokerage</th><th>Total</th><th>Cash</th><th>Buying Power</th><th>Day Change</th>
             </tr>
         </thead>
         <tbody>
@@ -104,6 +104,13 @@
                     ${{ "{:,.2f}".format(a.cash or 0) }}
                 </td>
                 <td>${{ "{:,.2f}".format(a.buying_power or 0) }}</td>
+                {% if a.day_change is not none %}
+                <td class="{% if a.day_change >= 0 %}pos{% else %}neg{% endif %}">
+                    ${{ "{:,.2f}".format(a.day_change) }}
+                </td>
+                {% else %}
+                <td>&mdash;</td>
+                {% endif %}
             </tr>
             {% endfor %}        
         </tbody>

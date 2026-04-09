@@ -200,11 +200,23 @@ def _render_dashboard(request: Request, paper: bool):
     positions_dicts = [dict(p) for p in positions]
     total_day_change = sum(p["day_change"] for p in positions_dicts if p.get("day_change") is not None)
 
+    # Per-account day change, keyed by account_id
+    account_day_change: dict[str, float] = {}
+    for p in positions_dicts:
+        if p.get("day_change") is not None:
+            account_day_change[p["account_id"]] = (
+                account_day_change.get(p["account_id"], 0) + p["day_change"]
+            )
+
+    accounts_dicts = [dict(a) for a in accounts]
+    for a in accounts_dicts:
+        a["day_change"] = account_day_change.get(a["id"])
+
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
-            "accounts": [dict(a) for a in accounts],
+            "accounts": accounts_dicts,
             "positions": positions_dicts,
             "net_value": totals["net_value"],
             "total_cash": totals["total_cash"],
