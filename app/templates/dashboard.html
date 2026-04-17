@@ -181,40 +181,81 @@
         refreshRelative();
         setInterval(refreshRelative, 30 * 1000);
 
-        async function syncNow() {
+        const SYNC_POLL_MS = 2000;
+        const ORIGINAL_BTN_TEXT = 'Sync now';
+
+        async function refreshDashboardContent() {
+            const pageRes = await fetch(window.location.pathname);
+            const html = await pageRes.text();
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const newContent = doc.getElementById('dashboard-content');
+            if (newContent) {
+                document.getElementById('dashboard-content').replaceWith(newContent);
+            }
+            const newSyncLine = doc.getElementById('last-sync-line');
+            if (newSyncLine) {
+                document.getElementById('last-sync-line').replaceWith(newSyncLine);
+            }
+            refreshRelative();
+        }
+
+        function setBtnState(text, disabled) {
             const btn = document.getElementById('sync-btn');
-            const original = btn.textContent;
-            btn.disabled = true;
-            btn.textContent = 'Syncing';
+            btn.textContent = text;
+            btn.disabled = disabled;
+        }
+
+        async function pollSyncStatus() {
+            try {
+                const res = await fetch('/api/sync/status');
+                if (!res.ok) return;
+                const state = await res.json();
+
+                if (state.running) {
+                    setBtnState('Syncing...', true);
+                    setTimeout(pollSyncStatus, SYNC_POLL_MS);
+                } else {
+                    // Sync finished — refresh and reset button
+                    await refreshDashboardContent();
+                    if (state.error) {
+                        setBtnState('Failed', false);
+                        setTimeout(() => setBtnState(ORIGINAL_BTN_TEXT, false), 3000);
+                    } else {
+                        setBtnState(ORIGINAL_BTN_TEXT, false);
+                    }
+                }
+            } catch (e) {
+                setTimeout(pollSyncStatus, SYNC_POLL_MS);
+            }
+        }
+
+        async function syncNow() {
+            setBtnState('Syncing...', true);
             try {
                 const res = await fetch('/api/sync', { method: 'POST' });
                 if (!res.ok) throw new Error('sync failed');
-
-                // Re-fetch the current page and swap in the updated parts in place.
-                const pageRes = await fetch(window.location.pathname);
-                const html = await pageRes.text();
-                const doc = new DOMParser().parseFromString(html, 'text/html');
-
-                const newContent = doc.getElementById('dashboard-content');
-                if (newContent) {
-                    document.getElementById('dashboard-content').replaceWith(newContent);
-                }
-                const newSyncLine = doc.getElementById('last-sync-line');
-                if (newSyncLine) {
-                    document.getElementById('last-sync-line').replaceWith(newSyncLine);
-                }
-                refreshRelative();
-
-                btn.textContent = original;
-                btn.disabled = false;
+                // Begin polling for completion
+                setTimeout(pollSyncStatus, SYNC_POLL_MS);
             } catch (e) {
-                btn.textContent = 'Failed';
-                setTimeout(() => {
-                    btn.textContent = original;
-                    btn.disabled = false;
-                }, 2000);
+                setBtnState('Failed', false);
+                setTimeout(() => setBtnState(ORIGINAL_BTN_TEXT, false), 3000);
             }
         }
+
+        // On page load, if a sync is already in progress (e.g. started by scheduler
+        // or another tab), pick up polling so the UI reflects state correctly.
+        (async () => {
+            try {
+                const res = await fetch('/api/sync/status');
+                if (res.ok) {
+                    const state = await res.json();
+                    if (state.running) {
+                        setBtnState('Syncing...', true);
+                        setTimeout(pollSyncStatus, SYNC_POLL_MS);
+                    }
+                }
+            } catch (e) { /* ignore */ }
+        })();
     </script>
 </body>
 </html>

@@ -27,6 +27,20 @@ templates = Jinja2Templates(directory="app/templates")
 # Lock ensures only one sync runs at a time, regardless of source (manual or scheduled).
 _sync_lock = threading.Lock()
 
+# Sync state for the frontend to poll. Updated under _sync_state_lock.
+_sync_state_lock = threading.Lock()
+_sync_state = {
+    "running": False,
+    "started_at": None,      # ISO timestamp when last sync began
+    "finished_at": None,     # ISO timestamp when last sync finished
+    "error": None,           # error message from the last sync, if any
+}
+
+
+def _set_sync_state(**kwargs):
+    with _sync_state_lock:
+        _sync_state.update(kwargs)
+
 
 def _locked_sync(force: bool, snapshot_kind: str | None = None) -> bool:
     """
@@ -36,11 +50,23 @@ def _locked_sync(force: bool, snapshot_kind: str | None = None) -> bool:
     if not _sync_lock.acquire(blocking=False):
         print("  sync skipped: another sync is already running")
         return False
+    _set_sync_state(
+        running=True,
+        started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        error=None,
+    )
     try:
         run_sync(force=force, snapshot_kind=snapshot_kind)
         return True
+    except Exception as e:
+        _set_sync_state(error=str(e))
+        raise
     finally:
         _sync_lock.release()
+        _set_sync_state(
+            running=False,
+            finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        )
 
 
 def _scheduled_sync():
@@ -127,8 +153,25 @@ def api_history():
 
 @app.post("/api/sync")
 def api_sync():
-    ran = _locked_sync(force=True)
-    return {"status": "ok" if ran else "already_running"}
+    """Kick off a forced sync in the background and return immediately."""
+    with _sync_state_lock:
+        if _sync_state["running"]:
+            return {"status": "already_running"}
+
+    def _run():
+        try:
+            _locked_sync(force=True)
+        except Exception as e:
+            print(f"sync error: {e}")
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/api/sync/status")
+def api_sync_status():
+    with _sync_state_lock:
+        return dict(_sync_state)
 
 
 # ---------- Dashboard ----------
