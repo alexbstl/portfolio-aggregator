@@ -26,6 +26,12 @@
         button:disabled { opacity: 0.7; cursor: wait; }
         .account-empty { opacity: 0.5; font-style: italic; }
         .account-empty td { color: #888; }
+        th.sortable { cursor: pointer; user-select: none; }
+        th.sortable:hover { background: #f0f0f0; }
+        th.sortable .arrow { color: #999; font-size: 0.75rem; margin-left: 0.25rem; }
+        th.sortable.sort-asc .arrow::after { content: '▲'; color: #222; }
+        th.sortable.sort-desc .arrow::after { content: '▼'; color: #222; }
+        th.sortable:not(.sort-asc):not(.sort-desc) .arrow::after { content: '⇅'; }
     </style>
 </head>
 <body>
@@ -117,17 +123,30 @@
     </table>
 
     <h2>Positions ({{ positions|length }})</h2>
-    <table>
+    <table id="positions-table">
         <thead>
             <tr>
-                <th>Symbol</th><th>Account</th><th>Units</th><th>Avg Price</th>
-                <th>Market Price</th><th>Market Value</th><th>Day Chg $</th>
-                <th>Day Chg %</th><th>Open P&L</th>
+                <th class="sortable" data-sort-key="symbol" data-sort-type="str">Symbol<span class="arrow"></span></th>
+                <th class="sortable" data-sort-key="account" data-sort-type="str">Account<span class="arrow"></span></th>
+                <th class="sortable" data-sort-key="units" data-sort-type="num">Units<span class="arrow"></span></th>
+                <th>Avg Price</th>
+                <th>Market Price</th>
+                <th class="sortable sort-desc" data-sort-key="mv_abs" data-sort-type="num">Market Value<span class="arrow"></span></th>
+                <th class="sortable" data-sort-key="day_change" data-sort-type="num">Day Chg $<span class="arrow"></span></th>
+                <th class="sortable" data-sort-key="day_change_pct" data-sort-type="num">Day Chg %<span class="arrow"></span></th>
+                <th class="sortable" data-sort-key="pnl" data-sort-type="num">Open P&L<span class="arrow"></span></th>
             </tr>
         </thead>
         <tbody>
             {% for p in positions %}
-            <tr class="{% if p.units < 0 %}short-row{% endif %}">
+            <tr class="{% if p.units < 0 %}short-row{% endif %}"
+                data-symbol="{{ p.symbol }}"
+                data-account="{{ p.account_name }}"
+                data-units="{{ p.units }}"
+                data-mv_abs="{{ (p.market_value or 0) | abs }}"
+                data-day_change="{{ p.day_change if p.day_change is not none else '' }}"
+                data-day_change_pct="{{ p.day_change_pct if p.day_change_pct is not none else '' }}"
+                data-pnl="{{ p.computed_pnl or 0 }}">
                 <td><strong>{{ p.symbol }}</strong> <small>{{ p.description }}</small></td>
                 <td>{{ p.account_name }}</td>
                 <td>{{ "{:,.4f}".format(p.units) }}</td>
@@ -181,6 +200,64 @@
         refreshRelative();
         setInterval(refreshRelative, 30 * 1000);
 
+        function sortPositionsTable(key, type, dir) {
+            const table = document.getElementById('positions-table');
+            if (!table) return;
+            const tbody = table.tBodies[0];
+            const rows = Array.from(tbody.rows);
+
+            const getVal = (row) => {
+                const raw = row.dataset[key];
+                if (type === 'num') {
+                    if (raw === '' || raw === undefined) return null;
+                    const n = parseFloat(raw);
+                    return isNaN(n) ? null : n;
+                }
+                return (raw || '').toLowerCase();
+            };
+
+            rows.sort((a, b) => {
+                const av = getVal(a);
+                const bv = getVal(b);
+                // Nulls always sink to the bottom
+                if (av === null && bv === null) return 0;
+                if (av === null) return 1;
+                if (bv === null) return -1;
+                if (av < bv) return dir === 'asc' ? -1 : 1;
+                if (av > bv) return dir === 'asc' ? 1 : -1;
+                return 0;
+            });
+
+            rows.forEach(r => tbody.appendChild(r));
+        }
+
+        function attachSortHandlers() {
+            const table = document.getElementById('positions-table');
+            if (!table) return;
+            table.querySelectorAll('th.sortable').forEach(th => {
+                th.addEventListener('click', () => {
+                    const key = th.dataset.sortKey;
+                    const type = th.dataset.sortType;
+                    let dir;
+                    if (th.classList.contains('sort-asc')) {
+                        dir = 'desc';
+                    } else if (th.classList.contains('sort-desc')) {
+                        dir = 'asc';
+                    } else {
+                        // First click: numeric defaults to desc, string to asc
+                        dir = type === 'num' ? 'desc' : 'asc';
+                    }
+                    table.querySelectorAll('th.sortable').forEach(other => {
+                        other.classList.remove('sort-asc', 'sort-desc');
+                    });
+                    th.classList.add(dir === 'asc' ? 'sort-asc' : 'sort-desc');
+                    sortPositionsTable(key, type, dir);
+                });
+            });
+        }
+
+        attachSortHandlers();
+
         const SYNC_POLL_MS = 2000;
         const ORIGINAL_BTN_TEXT = 'Sync now';
 
@@ -197,6 +274,7 @@
                 document.getElementById('last-sync-line').replaceWith(newSyncLine);
             }
             refreshRelative();
+            attachSortHandlers();
         }
 
         function setBtnState(text, disabled) {
