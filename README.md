@@ -9,6 +9,7 @@ Aggregates brokerage accounts and positions via [SnapTrade](https://snaptrade.co
 - **Daily change tracking** — a 9:29 ET pre-market snapshot captures reference prices; day change $ and % are computed at read time
 - **Historical snapshots** — position and account-level snapshots stored for equity curve analysis
 - **Paper/real separation** — separate dashboard views at `/` and `/paper`
+- **Locally-computed account totals** — `total_value` is recomputed each sync as `cash + Σ position market_value` rather than trusting the broker-reported total (works around a Robinhood undercounting bug). Equities + cash only; options aren't synced yet, so options-holding accounts would underreport.
 
 ## Quickstart
 

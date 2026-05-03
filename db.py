@@ -336,6 +336,30 @@ def fetch_positions_with_day_change(conn, is_paper: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def recompute_account_total(conn, account_id: str):
+    """
+    Overwrite accounts.total_value with cash + SUM(positions.market_value).
+    SnapTrade's broker-reported total is unreliable for some brokers
+    (Robinhood has returned ~$4 vs an actual ~$37k). Cash and per-position
+    market values are reliable, so we recompute. market_value is signed,
+    so shorts subtract correctly. Skipped when cash is NULL (balance fetch
+    failed) to avoid zeroing out the cash component.
+
+    Caveat: options aren't stored in `positions`, so accounts holding
+    options will underreport here.
+    """
+    conn.execute(
+        """
+        UPDATE accounts
+        SET total_value = cash + COALESCE(
+            (SELECT SUM(market_value) FROM positions WHERE account_id = ?), 0
+        )
+        WHERE id = ? AND cash IS NOT NULL
+        """,
+        (account_id, account_id),
+    )
+
+
 def insert_account_value_snapshot(conn, account_id: str, snapshot_at: str):
     """Compute long/short totals from the just-written positions and snapshot the account."""
     row = conn.execute(

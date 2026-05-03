@@ -15,6 +15,7 @@ from db import (
     upsert_connection,
     upsert_account,
     replace_positions,
+    recompute_account_total,
     insert_account_value_snapshot,
 )
 
@@ -167,6 +168,7 @@ def run_sync(force: bool = False, snapshot_kind: str | None = None):
             print(f"    {len(positions)} positions")
             replace_positions(conn, acct_id, positions, snapshot_at,
                               snapshot_kind=snapshot_kind)
+            recompute_account_total(conn, acct_id)
             insert_account_value_snapshot(conn, acct_id, snapshot_at)
 
         if should_prune:
