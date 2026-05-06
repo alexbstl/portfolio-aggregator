@@ -143,16 +143,16 @@
                 data-symbol="{{ p.symbol }}"
                 data-account="{{ p.account_name }}"
                 data-units="{{ p.units }}"
-                data-mv_abs="{{ (p.market_value or 0) | abs }}"
+                data-mv_abs="{{ (p.effective_market_value or 0) | abs }}"
                 data-day_change="{{ p.day_change if p.day_change is not none else '' }}"
                 data-day_change_pct="{{ p.day_change_pct if p.day_change_pct is not none else '' }}"
-                data-pnl="{{ p.computed_pnl or 0 }}">
+                data-pnl="{{ p.effective_pnl or 0 }}">
                 <td><strong>{{ p.symbol }}</strong> <small>{{ p.description }}</small></td>
                 <td>{{ p.account_name }}</td>
                 <td>{{ "{:,.4f}".format(p.units) }}</td>
                 <td>${{ "{:,.2f}".format(p.avg_purchase_price or 0) }}</td>
-                <td>${{ "{:,.2f}".format(p.market_price or 0) }}</td>
-                <td>${{ "{:,.2f}".format(p.market_value or 0) }}</td>
+                <td>${{ "{:,.2f}".format(p.effective_price or 0) }}</td>
+                <td>${{ "{:,.2f}".format(p.effective_market_value or 0) }}</td>
                 {% if p.day_change is not none %}
                 <td class="{% if p.day_change >= 0 %}pos{% else %}neg{% endif %}">
                     ${{ "{:,.2f}".format(p.day_change) }}
@@ -167,8 +167,8 @@
                 {% else %}
                 <td>&mdash;</td>
                 {% endif %}
-                <td class="{% if (p.computed_pnl or 0) >= 0 %}pos{% else %}neg{% endif %}">
-                    ${{ "{:,.2f}".format(p.computed_pnl or 0) }}
+                <td class="{% if (p.effective_pnl or 0) >= 0 %}pos{% else %}neg{% endif %}">
+                    ${{ "{:,.2f}".format(p.effective_pnl or 0) }}
                 </td>
             </tr>
             {% endfor %}

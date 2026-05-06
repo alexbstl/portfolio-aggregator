@@ -221,11 +221,16 @@ def _render_dashboard(request: Request, paper: bool):
         long_short = conn.execute(
             """
             SELECT
-                COALESCE(SUM(CASE WHEN p.units > 0 THEN p.market_value END), 0) AS long_mv,
-                COALESCE(SUM(CASE WHEN p.units < 0 THEN p.market_value END), 0) AS short_mv,
-                COALESCE(SUM(p.computed_pnl), 0) AS total_pnl
+                COALESCE(SUM(CASE WHEN p.units > 0
+                    THEN COALESCE(pr.price, p.market_price) * p.units END), 0) AS long_mv,
+                COALESCE(SUM(CASE WHEN p.units < 0
+                    THEN COALESCE(pr.price, p.market_price) * p.units END), 0) AS short_mv,
+                COALESCE(SUM(
+                    COALESCE((pr.price - p.avg_purchase_price) * p.units, p.computed_pnl)
+                ), 0) AS total_pnl
             FROM positions p
             JOIN accounts a ON a.id = p.account_id
+            LEFT JOIN prices pr ON pr.symbol = p.symbol
             WHERE a.is_paper = ?
             """,
             (is_paper_flag,),

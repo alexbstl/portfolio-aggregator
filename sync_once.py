@@ -15,6 +15,7 @@ from db import (
     upsert_connection,
     upsert_account,
     replace_positions,
+    refresh_prices,
     recompute_account_total,
     insert_account_value_snapshot,
 )
@@ -140,8 +141,11 @@ def run_sync(force: bool = False, snapshot_kind: str | None = None):
         for c in connections:
             upsert_connection(conn, c)
 
+        # Pass 1: sync account metadata + positions from broker
+        acct_ids = []
         for acct in accounts:
             acct_id = acct["id"]
+            acct_ids.append(acct_id)
             acct_label = acct.get("name") or acct.get("institution_name") or acct_id
             print(f"  account: {acct_label}")
 
@@ -168,6 +172,17 @@ def run_sync(force: bool = False, snapshot_kind: str | None = None):
             print(f"    {len(positions)} positions")
             replace_positions(conn, acct_id, positions, snapshot_at,
                               snapshot_kind=snapshot_kind)
+
+        # Refresh external prices for all live symbols before recomputing totals
+        symbols = [
+            row[0] for row in
+            conn.execute("SELECT DISTINCT symbol FROM positions").fetchall()
+        ]
+        print(f"  refreshing prices for {len(symbols)} symbol(s) via yfinance...")
+        refresh_prices(conn, symbols)
+
+        # Pass 2: recompute account totals (uses external prices) + snapshot
+        for acct_id in acct_ids:
             recompute_account_total(conn, acct_id)
             insert_account_value_snapshot(conn, acct_id, snapshot_at)
 
@@ -186,10 +201,13 @@ def run_sync(force: bool = False, snapshot_kind: str | None = None):
                 COUNT(p.symbol) AS n_positions,
                 SUM(CASE WHEN p.units > 0 THEN 1 ELSE 0 END) AS n_long,
                 SUM(CASE WHEN p.units < 0 THEN 1 ELSE 0 END) AS n_short,
-                ROUND(COALESCE(SUM(CASE WHEN p.units > 0 THEN p.market_value END), 0), 2) AS long_mv,
-                ROUND(COALESCE(SUM(CASE WHEN p.units < 0 THEN p.market_value END), 0), 2) AS short_mv
+                ROUND(COALESCE(SUM(CASE WHEN p.units > 0
+                    THEN COALESCE(pr.price, p.market_price) * p.units END), 0), 2) AS long_mv,
+                ROUND(COALESCE(SUM(CASE WHEN p.units < 0
+                    THEN COALESCE(pr.price, p.market_price) * p.units END), 0), 2) AS short_mv
             FROM accounts a
             LEFT JOIN positions p ON p.account_id = a.id
+            LEFT JOIN prices pr ON pr.symbol = p.symbol
             GROUP BY a.id
             """
         ):

@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import os
+import yfinance as yf
 
 DB_PATH = Path(os.environ.get("DATABASE_PATH", "./data/portfolio.db"))
 
@@ -110,6 +111,16 @@ CREATE INDEX IF NOT EXISTS idx_position_snapshots_account
 
 CREATE INDEX IF NOT EXISTS idx_position_snapshots_kind
     ON position_snapshots(snapshot_kind, snapshot_at);
+
+-- Latest external market prices, refreshed each sync.
+-- price = most recent trade (including after-hours); prev_close = prior regular-session close.
+-- Used as the primary price source; broker prices in `positions` are the fallback.
+CREATE TABLE IF NOT EXISTS prices (
+    symbol      TEXT PRIMARY KEY,
+    price       REAL,
+    prev_close  REAL,
+    as_of       TEXT
+);
 
 -- Account-level historical snapshots for the equity curve.
 CREATE TABLE IF NOT EXISTS account_value_snapshots (
@@ -321,19 +332,69 @@ def fetch_positions_with_day_change(conn, is_paper: int) -> list[sqlite3.Row]:
                   AND ps2.snapshot_kind = 'pre_open'
               )
         )
-        SELECT p.*, a.name AS account_name, r.ref_price,
-          CASE WHEN r.ref_price IS NOT NULL AND p.market_price IS NOT NULL
-               THEN (p.market_price - r.ref_price) * p.units END AS day_change,
-          CASE WHEN r.ref_price IS NOT NULL AND r.ref_price != 0 AND p.market_price IS NOT NULL
-               THEN (p.market_price - r.ref_price) / r.ref_price END AS day_change_pct
+        SELECT
+            p.*,
+            a.name AS account_name,
+            COALESCE(pr.price, p.market_price) AS effective_price,
+            COALESCE(pr.price, p.market_price) * p.units AS effective_market_value,
+            COALESCE(
+                (pr.price - p.avg_purchase_price) * p.units,
+                p.computed_pnl
+            ) AS effective_pnl,
+            COALESCE(pr.prev_close, r.ref_price) AS day_ref_price,
+            CASE
+                WHEN COALESCE(pr.prev_close, r.ref_price) IS NOT NULL
+                 AND COALESCE(pr.price, p.market_price) IS NOT NULL
+                THEN (COALESCE(pr.price, p.market_price) - COALESCE(pr.prev_close, r.ref_price))
+                     * p.units
+            END AS day_change,
+            CASE
+                WHEN COALESCE(pr.prev_close, r.ref_price) IS NOT NULL
+                 AND COALESCE(pr.prev_close, r.ref_price) != 0
+                 AND COALESCE(pr.price, p.market_price) IS NOT NULL
+                THEN (COALESCE(pr.price, p.market_price) - COALESCE(pr.prev_close, r.ref_price))
+                     / COALESCE(pr.prev_close, r.ref_price)
+            END AS day_change_pct
         FROM positions p
         JOIN accounts a ON a.id = p.account_id
+        LEFT JOIN prices pr ON pr.symbol = p.symbol
         LEFT JOIN ref_prices r ON r.account_id = p.account_id AND r.symbol = p.symbol
         WHERE a.is_paper = ?
-        ORDER BY ABS(p.market_value) DESC
+        ORDER BY ABS(COALESCE(pr.price, p.market_price) * p.units) DESC
         """,
         (is_paper,),
     ).fetchall()
+
+
+def refresh_prices(conn, symbols: list[str]):
+    """
+    Fetch current price + previous close from Yahoo Finance for each symbol
+    and upsert into the `prices` table. Failures per-symbol are swallowed so
+    a bad ticker doesn't abort the sync; the stale row (if any) stays in place.
+    """
+    if not symbols:
+        return
+    ts = now_iso()
+    for symbol in symbols:
+        try:
+            fi = yf.Ticker(symbol).fast_info
+            price = fi.last_price
+            prev_close = fi.previous_close
+        except Exception:
+            continue
+        if price is None:
+            continue
+        conn.execute(
+            """
+            INSERT INTO prices (symbol, price, prev_close, as_of)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                price      = excluded.price,
+                prev_close = excluded.prev_close,
+                as_of      = excluded.as_of
+            """,
+            (symbol, price, prev_close, ts),
+        )
 
 
 def recompute_account_total(conn, account_id: str):
@@ -352,7 +413,11 @@ def recompute_account_total(conn, account_id: str):
         """
         UPDATE accounts
         SET total_value = cash + COALESCE(
-            (SELECT SUM(market_value) FROM positions WHERE account_id = ?), 0
+            (SELECT SUM(COALESCE(pr.price, p.market_price) * p.units)
+             FROM positions p
+             LEFT JOIN prices pr ON pr.symbol = p.symbol
+             WHERE p.account_id = ?),
+            0
         )
         WHERE id = ? AND cash IS NOT NULL
         """,
