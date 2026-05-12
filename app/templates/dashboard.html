@@ -32,6 +32,8 @@
         th.sortable.sort-asc .arrow::after { content: '▲'; color: #222; }
         th.sortable.sort-desc .arrow::after { content: '▼'; color: #222; }
         th.sortable:not(.sort-asc):not(.sort-desc) .arrow::after { content: '⇅'; }
+        .sync-warn { color: #b7791f; font-weight: 600; }
+        .sync-stale { color: #c0392b; font-weight: 600; }
     </style>
 </head>
 <body>
@@ -93,7 +95,7 @@
     <table>
         <thead>
             <tr>
-                <th>Account</th><th>Brokerage</th><th>Total</th><th>Cash</th><th>Buying Power</th><th>Day Change</th>
+                <th>Account</th><th>Brokerage</th><th>Total</th><th>Cash</th><th>Buying Power</th><th>Day Change</th><th>Broker Sync</th>
             </tr>
         </thead>
         <tbody>
@@ -117,8 +119,9 @@
                 {% else %}
                 <td>&mdash;</td>
                 {% endif %}
+                <td class="broker-sync-cell" data-iso="{{ a.last_holdings_sync or '' }}">&mdash;</td>
             </tr>
-            {% endfor %}        
+            {% endfor %}
         </tbody>
     </table>
 
@@ -197,8 +200,22 @@
             el.textContent = formatRelative(el.dataset.iso);
         }
 
+        function initBrokerSyncCells() {
+            document.querySelectorAll('.broker-sync-cell').forEach(td => {
+                const iso = td.dataset.iso;
+                if (!iso) return;
+                const secs = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+                td.textContent = formatRelative(iso);
+                td.classList.remove('sync-warn', 'sync-stale');
+                if (secs > 86400) td.classList.add('sync-stale');       // > 24h
+                else if (secs > 14400) td.classList.add('sync-warn');   // > 4h
+            });
+        }
+
         refreshRelative();
+        initBrokerSyncCells();
         setInterval(refreshRelative, 30 * 1000);
+        setInterval(initBrokerSyncCells, 30 * 1000);
 
         function sortPositionsTable(key, type, dir) {
             const table = document.getElementById('positions-table');
@@ -274,6 +291,7 @@
                 document.getElementById('last-sync-line').replaceWith(newSyncLine);
             }
             refreshRelative();
+            initBrokerSyncCells();
             attachSortHandlers();
         }
 

@@ -238,9 +238,10 @@ def _render_dashboard(request: Request, paper: bool):
 
         last_sync = conn.execute(
             """
-            SELECT MAX(last_holdings_sync) AS ts
-            FROM accounts
-            WHERE is_paper = ?
+            SELECT MAX(avs.snapshot_at) AS ts
+            FROM account_value_snapshots avs
+            JOIN accounts a ON a.id = avs.account_id
+            WHERE a.is_paper = ?
             """,
             (is_paper_flag,),
         ).fetchone()
