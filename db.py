@@ -341,6 +341,12 @@ def fetch_positions_with_day_change(conn, is_paper: int) -> list[sqlite3.Row]:
                 (pr.price - p.avg_purchase_price) * p.units,
                 p.computed_pnl
             ) AS effective_pnl,
+            CASE
+                WHEN p.avg_purchase_price IS NOT NULL AND p.avg_purchase_price != 0
+                 AND p.units != 0
+                THEN COALESCE((pr.price - p.avg_purchase_price) * p.units, p.computed_pnl)
+                     / (p.avg_purchase_price * ABS(p.units))
+            END AS effective_pnl_pct,
             COALESCE(pr.prev_close, r.ref_price) AS day_ref_price,
             CASE
                 WHEN COALESCE(pr.prev_close, r.ref_price) IS NOT NULL
@@ -354,6 +360,7 @@ def fetch_positions_with_day_change(conn, is_paper: int) -> list[sqlite3.Row]:
                  AND COALESCE(pr.price, p.market_price) IS NOT NULL
                 THEN (COALESCE(pr.price, p.market_price) - COALESCE(pr.prev_close, r.ref_price))
                      / COALESCE(pr.prev_close, r.ref_price)
+                     * (CASE WHEN p.units < 0 THEN -1 ELSE 1 END)
             END AS day_change_pct
         FROM positions p
         JOIN accounts a ON a.id = p.account_id

@@ -227,7 +227,8 @@ def _render_dashboard(request: Request, paper: bool):
                     THEN COALESCE(pr.price, p.market_price) * p.units END), 0) AS short_mv,
                 COALESCE(SUM(
                     COALESCE((pr.price - p.avg_purchase_price) * p.units, p.computed_pnl)
-                ), 0) AS total_pnl
+                ), 0) AS total_pnl,
+                COALESCE(SUM(p.avg_purchase_price * ABS(p.units)), 0) AS cost_basis
             FROM positions p
             JOIN accounts a ON a.id = p.account_id
             LEFT JOIN prices pr ON pr.symbol = p.symbol
@@ -261,18 +262,41 @@ def _render_dashboard(request: Request, paper: bool):
     for a in accounts_dicts:
         a["day_change"] = account_day_change.get(a["id"])
 
+    net_value = totals["net_value"]
+    long_mv = long_short["long_mv"]
+    short_mv = long_short["short_mv"]
+    total_pnl = long_short["total_pnl"]
+    cost_basis = long_short["cost_basis"]
+    net_exposure = long_mv + short_mv
+
+    # Percentages. Exposure is measured against net liquidation value (NLV);
+    # Open P&L against gross cost basis; day change against the prior-day
+    # portfolio value (current NLV minus today's change).
+    long_pct = (long_mv / net_value) if net_value else None
+    short_pct = (short_mv / net_value) if net_value else None
+    net_exposure_pct = (net_exposure / net_value) if net_value else None
+    pnl_pct = (total_pnl / cost_basis) if cost_basis else None
+    prior_value = net_value - total_day_change
+    day_change_pct = (total_day_change / prior_value) if prior_value else None
+
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
             "accounts": accounts_dicts,
             "positions": positions_dicts,
-            "net_value": totals["net_value"],
+            "net_value": net_value,
             "total_cash": totals["total_cash"],
-            "long_mv": long_short["long_mv"],
-            "short_mv": long_short["short_mv"],
-            "total_pnl": long_short["total_pnl"],
+            "long_mv": long_mv,
+            "short_mv": short_mv,
+            "long_pct": long_pct,
+            "short_pct": short_pct,
+            "net_exposure": net_exposure,
+            "net_exposure_pct": net_exposure_pct,
+            "total_pnl": total_pnl,
+            "pnl_pct": pnl_pct,
             "total_day_change": total_day_change,
+            "day_change_pct": day_change_pct,
             "is_paper_view": paper,
             "last_sync": last_sync["ts"],
         },
