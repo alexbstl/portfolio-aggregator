@@ -580,6 +580,8 @@ def refresh_benchmark_history(conn, symbol: str, retries: int = 2) -> bool:
             close = float(row["Close"])
         except Exception:
             continue
+        if close != close:  # NaN (halts / missing bars)
+            continue
         conn.execute(
             """
             INSERT INTO benchmark_prices (symbol, date, close)
@@ -756,9 +758,12 @@ def _load_symbol_prices(symbol: str, start: str, retries: int = 2):
     closes: dict[str, float] = {}
     for idx, row in hist.iterrows():
         try:
-            closes[idx.strftime("%Y-%m-%d")] = float(row["Close"])
+            c = float(row["Close"])
         except Exception:
             continue
+        if c != c:  # NaN (halts / missing bars); SQLite would store it as NULL
+            continue
+        closes[idx.strftime("%Y-%m-%d")] = c
     sp: list[tuple[str, float]] = []
     try:
         for idx, ratio in splits.items():
