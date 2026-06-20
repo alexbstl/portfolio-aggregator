@@ -14,7 +14,16 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
-from db import db, init_db, fetch_positions_with_day_change
+from db import (
+    db,
+    init_db,
+    fetch_positions_with_day_change,
+    fetch_daily_equity_series,
+    fetch_aligned_benchmark_series,
+    list_benchmarks,
+    add_benchmark,
+    remove_benchmark,
+)
 from sync_once import run_sync
 
 load_dotenv()
@@ -139,16 +148,67 @@ def api_positions(paper: bool = False):
 
 
 @app.get("/api/history")
-def api_history():
+def api_history(days: int | None = None):
+    where = ""
+    params: list = []
+    if days:
+        where = "WHERE date(snapshot_at) >= date('now', ?)"
+        params.append(f"-{int(days)} days")
     with db() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT snapshot_at, account_id, total_value, long_market_value, short_market_value
             FROM account_value_snapshots
+            {where}
             ORDER BY snapshot_at
-            """
+            """,
+            params,
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.get("/api/performance")
+def api_performance(paper: bool = False, days: int | None = None):
+    """Daily portfolio equity series plus each benchmark's close aligned to the
+    same dates. Frontend normalizes to % or $ at display time."""
+    is_paper_flag = 1 if paper else 0
+    with db() as conn:
+        series = fetch_daily_equity_series(conn, is_paper_flag, days)
+        dates = [p["date"] for p in series]
+        benchmarks = {
+            sym: fetch_aligned_benchmark_series(conn, sym, dates)
+            for sym in list_benchmarks(conn)
+        }
+    return {
+        "dates": dates,
+        "portfolio": [p["value"] for p in series],
+        "benchmarks": benchmarks,
+    }
+
+
+@app.get("/api/benchmarks")
+def api_benchmarks_list():
+    with db() as conn:
+        return list_benchmarks(conn)
+
+
+@app.post("/api/benchmarks")
+def api_benchmarks_add(payload: dict):
+    symbol = (payload.get("symbol") or "").strip().upper()
+    if not symbol:
+        return {"error": "symbol required"}
+    with db() as conn:
+        ok = add_benchmark(conn, symbol)
+        if not ok:
+            return {"error": f"could not resolve '{symbol}' on Yahoo Finance"}
+        return {"benchmarks": list_benchmarks(conn)}
+
+
+@app.delete("/api/benchmarks/{symbol}")
+def api_benchmarks_remove(symbol: str):
+    with db() as conn:
+        remove_benchmark(conn, symbol)
+        return {"benchmarks": list_benchmarks(conn)}
 
 
 @app.post("/api/sync")

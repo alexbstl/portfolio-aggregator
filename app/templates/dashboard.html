@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>Portfolio</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
                max-width: 1400px; margin: 2rem auto; padding: 0 1rem; color: #222; }
@@ -37,6 +38,20 @@
         th.sortable:not(.sort-asc):not(.sort-desc) .arrow::after { content: '⇅'; }
         .sync-warn { color: #b7791f; font-weight: 600; }
         .sync-stale { color: #c0392b; font-weight: 600; }
+        .perf-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem;
+                         margin: 0.5rem 0 1rem; font-size: 0.85rem; }
+        .perf-controls .group { display: flex; gap: 0.25rem; }
+        .seg { padding: 0.3rem 0.7rem; border: 1px solid #ddd; background: #fff; cursor: pointer;
+               border-radius: 4px; color: #444; }
+        .seg.active { background: #222; color: #fff; border-color: #222; }
+        .bench-chip { display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.2rem 0.5rem;
+                      background: #eef; border-radius: 12px; font-size: 0.8rem; }
+        .bench-chip button { background: none; border: none; color: #888; cursor: pointer;
+                             padding: 0; font-size: 0.9rem; line-height: 1; }
+        .bench-add input { padding: 0.3rem 0.5rem; border: 1px solid #ddd; border-radius: 4px;
+                           width: 6rem; font-size: 0.8rem; }
+        .perf-msg { color: #c0392b; font-size: 0.8rem; }
+        .perf-empty { color: #888; font-style: italic; font-size: 0.9rem; margin: 1rem 0; }
     </style>
 </head>
 <body>
@@ -219,6 +234,33 @@
     </table>
     </div>
 
+    <h2>Performance</h2>
+    <div class="perf-controls">
+        <div class="group" id="perf-mode">
+            <button class="seg active" data-mode="pct">% Return</button>
+            <button class="seg" data-mode="dollar">$ Value</button>
+        </div>
+        <div class="group" id="perf-range">
+            <button class="seg" data-days="30">30D</button>
+            <button class="seg" data-days="90">90D</button>
+            <button class="seg active" data-days="365">1Y</button>
+            <button class="seg" data-days="0">All</button>
+        </div>
+        <div class="group" id="bench-chips"></div>
+        <div class="group bench-add">
+            <input id="bench-input" type="text" placeholder="Add ticker" maxlength="12">
+            <button class="seg" id="bench-add-btn">Add</button>
+        </div>
+        <span class="perf-msg" id="perf-msg"></span>
+    </div>
+    <canvas id="perf-chart" height="110"></canvas>
+    <div class="perf-empty" id="perf-empty" style="display:none;">
+        No snapshot history yet — the equity curve fills in as syncs accumulate.
+    </div>
+
+    <script>
+        const IS_PAPER = {{ 'true' if is_paper_view else 'false' }};
+    </script>
     <script>
         function formatRelative(iso) {
             if (!iso) return '';
@@ -392,6 +434,192 @@
                 }
             } catch (e) { /* ignore */ }
         })();
+
+        // ----- Performance chart -----
+        const PERF_COLORS = ['#2563eb', '#0a7c2a', '#c0392b', '#b7791f', '#7c3aed', '#0891b2'];
+        let perfState = { mode: 'pct', days: 365, data: null };
+        let perfChart = null;
+
+        async function fetchPerformance() {
+            const days = perfState.days;
+            const qs = `paper=${IS_PAPER}` + (days ? `&days=${days}` : '');
+            const res = await fetch('/api/performance?' + qs);
+            if (!res.ok) return null;
+            return await res.json();
+        }
+
+        function firstNonNullIndex(arr) {
+            for (let i = 0; i < arr.length; i++) {
+                if (arr[i] !== null && arr[i] !== undefined) return i;
+            }
+            return -1;
+        }
+
+        // Normalize a raw series for display. pct: indexed to 0% at its first
+        // point. dollar: portfolio shown raw; a benchmark is scaled so it starts
+        // at the portfolio's starting dollar value ("same $ invested in SPY").
+        function transformSeries(raw, mode, portfolioRaw) {
+            if (mode === 'pct') {
+                const i = firstNonNullIndex(raw);
+                if (i < 0) return raw.map(() => null);
+                const base = raw[i];
+                return raw.map(v => (v == null) ? null : (v / base - 1) * 100);
+            }
+            if (raw === portfolioRaw) return raw.slice();
+            const pi = firstNonNullIndex(portfolioRaw);
+            if (pi < 0) return raw.map(() => null);
+            const pBase = portfolioRaw[pi];
+            const bBase = raw[pi] ?? raw[firstNonNullIndex(raw)];
+            if (!bBase) return raw.map(() => null);
+            return raw.map(v => (v == null) ? null : pBase * (v / bBase));
+        }
+
+        function perfFormatter() {
+            return perfState.mode === 'pct'
+                ? (v) => (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
+                : (v) => '$' + Math.round(v).toLocaleString();
+        }
+
+        function renderPerfChart() {
+            const d = perfState.data;
+            const canvas = document.getElementById('perf-chart');
+            const empty = document.getElementById('perf-empty');
+            if (!d || !d.dates || d.dates.length === 0) {
+                if (perfChart) { perfChart.destroy(); perfChart = null; }
+                canvas.style.display = 'none';
+                empty.style.display = 'block';
+                return;
+            }
+            canvas.style.display = 'block';
+            empty.style.display = 'none';
+
+            const mode = perfState.mode;
+            const fmt = perfFormatter();
+            const datasets = [];
+            let ci = 0;
+            datasets.push({
+                label: 'Portfolio',
+                data: transformSeries(d.portfolio, mode, d.portfolio),
+                borderColor: PERF_COLORS[ci++ % PERF_COLORS.length],
+                borderWidth: 2, pointRadius: 0, tension: 0.1, spanGaps: true,
+            });
+            for (const sym of Object.keys(d.benchmarks)) {
+                datasets.push({
+                    label: sym,
+                    data: transformSeries(d.benchmarks[sym], mode, d.portfolio),
+                    borderColor: PERF_COLORS[ci++ % PERF_COLORS.length],
+                    borderWidth: 1.5, pointRadius: 0, tension: 0.1, spanGaps: true,
+                    borderDash: [4, 3],
+                });
+            }
+
+            if (perfChart) {
+                perfChart.data.labels = d.dates;
+                perfChart.data.datasets = datasets;
+                perfChart.options.scales.y.ticks.callback = fmt;
+                perfChart.options.plugins.tooltip.callbacks.label =
+                    (c) => c.dataset.label + ': ' + fmt(c.parsed.y);
+                perfChart.update();
+                return;
+            }
+            perfChart = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                data: { labels: d.dates, datasets },
+                options: {
+                    responsive: true, maintainAspectRatio: true, aspectRatio: 4,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { position: 'top', labels: { boxWidth: 12 } },
+                        tooltip: { callbacks: { label: (c) => c.dataset.label + ': ' + fmt(c.parsed.y) } },
+                    },
+                    scales: {
+                        x: { ticks: { maxTicksLimit: 8, autoSkip: true } },
+                        y: { ticks: { callback: fmt } },
+                    },
+                },
+            });
+        }
+
+        function renderBenchChips() {
+            const d = perfState.data;
+            const wrap = document.getElementById('bench-chips');
+            wrap.innerHTML = '';
+            if (!d || !d.benchmarks) return;
+            for (const sym of Object.keys(d.benchmarks)) {
+                const chip = document.createElement('span');
+                chip.className = 'bench-chip';
+                chip.textContent = sym + ' ';
+                const x = document.createElement('button');
+                x.textContent = '×';
+                x.title = 'Remove ' + sym;
+                x.onclick = () => removeBench(sym);
+                chip.appendChild(x);
+                wrap.appendChild(chip);
+            }
+        }
+
+        async function loadPerformance() {
+            perfState.data = await fetchPerformance();
+            renderBenchChips();
+            renderPerfChart();
+        }
+
+        async function addBench() {
+            const input = document.getElementById('bench-input');
+            const msg = document.getElementById('perf-msg');
+            const btn = document.getElementById('bench-add-btn');
+            const symbol = (input.value || '').trim().toUpperCase();
+            msg.textContent = '';
+            if (!symbol) return;
+            btn.disabled = true; btn.textContent = 'Adding…';
+            try {
+                const res = await fetch('/api/benchmarks', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symbol }),
+                });
+                const out = await res.json();
+                if (out.error) { msg.textContent = out.error; }
+                else { input.value = ''; await loadPerformance(); }
+            } catch (e) {
+                msg.textContent = 'add failed';
+            } finally {
+                btn.disabled = false; btn.textContent = 'Add';
+            }
+        }
+
+        async function removeBench(sym) {
+            try {
+                await fetch('/api/benchmarks/' + encodeURIComponent(sym), { method: 'DELETE' });
+                await loadPerformance();
+            } catch (e) { /* ignore */ }
+        }
+
+        function initPerfControls() {
+            document.querySelectorAll('#perf-mode .seg').forEach(b => {
+                b.onclick = () => {
+                    document.querySelectorAll('#perf-mode .seg').forEach(x => x.classList.remove('active'));
+                    b.classList.add('active');
+                    perfState.mode = b.dataset.mode;
+                    renderPerfChart();
+                };
+            });
+            document.querySelectorAll('#perf-range .seg').forEach(b => {
+                b.onclick = () => {
+                    document.querySelectorAll('#perf-range .seg').forEach(x => x.classList.remove('active'));
+                    b.classList.add('active');
+                    perfState.days = parseInt(b.dataset.days, 10);
+                    loadPerformance();
+                };
+            });
+            document.getElementById('bench-add-btn').onclick = addBench;
+            document.getElementById('bench-input').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') addBench();
+            });
+        }
+
+        initPerfControls();
+        loadPerformance();
     </script>
 </body>
 </html>

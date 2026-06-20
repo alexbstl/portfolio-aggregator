@@ -4,6 +4,7 @@ USD-only for now. Single file, no migrations framework — if the schema
 changes early on, just delete portfolio.db and re-sync.
 """
 import sqlite3
+import bisect
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -120,6 +121,20 @@ CREATE TABLE IF NOT EXISTS prices (
     price       REAL,
     prev_close  REAL,
     as_of       TEXT
+);
+
+-- Benchmark symbols the user has chosen to compare against (e.g. SPY, QQQ).
+CREATE TABLE IF NOT EXISTS benchmarks (
+    symbol      TEXT PRIMARY KEY,
+    added_at    TEXT
+);
+
+-- Daily close history for each benchmark symbol, pulled from Yahoo Finance.
+CREATE TABLE IF NOT EXISTS benchmark_prices (
+    symbol      TEXT NOT NULL,
+    date        TEXT NOT NULL,              -- YYYY-MM-DD
+    close       REAL NOT NULL,
+    PRIMARY KEY (symbol, date)
 );
 
 -- Account-level historical snapshots for the equity curve.
@@ -469,3 +484,140 @@ def insert_account_value_snapshot(conn, account_id: str, snapshot_at: str):
             row["short_mv"],
         ),
     )
+
+
+# ---------- benchmarks & performance ----------
+
+def list_benchmarks(conn) -> list[str]:
+    return [r[0] for r in conn.execute(
+        "SELECT symbol FROM benchmarks ORDER BY symbol"
+    ).fetchall()]
+
+
+def _earliest_snapshot_date(conn) -> str | None:
+    row = conn.execute(
+        "SELECT MIN(date(snapshot_at)) FROM account_value_snapshots"
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def refresh_benchmark_history(conn, symbol: str) -> bool:
+    """
+    Pull daily close history for `symbol` from Yahoo Finance, from the earliest
+    account snapshot date (so the comparison covers the full portfolio history)
+    to today, and upsert into benchmark_prices. Idempotent. Returns True if any
+    rows were written. Network/parse failures are swallowed and return False.
+    """
+    start = _earliest_snapshot_date(conn)
+    try:
+        tk = yf.Ticker(symbol)
+        hist = tk.history(start=start) if start else tk.history(period="1y")
+    except Exception:
+        return False
+    if hist is None or hist.empty:
+        return False
+    wrote = False
+    for idx, row in hist.iterrows():
+        try:
+            d = idx.strftime("%Y-%m-%d")
+            close = float(row["Close"])
+        except Exception:
+            continue
+        conn.execute(
+            """
+            INSERT INTO benchmark_prices (symbol, date, close)
+            VALUES (?, ?, ?)
+            ON CONFLICT(symbol, date) DO UPDATE SET close = excluded.close
+            """,
+            (symbol, d, close),
+        )
+        wrote = True
+    return wrote
+
+
+def add_benchmark(conn, symbol: str) -> bool:
+    """
+    Register a benchmark symbol and backfill its history. Returns True if the
+    symbol resolved to real price data (so the caller can reject typos).
+    """
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        return False
+    ok = refresh_benchmark_history(conn, symbol)
+    if not ok:
+        return False  # don't register a symbol Yahoo can't resolve
+    conn.execute(
+        "INSERT INTO benchmarks (symbol, added_at) VALUES (?, ?) "
+        "ON CONFLICT(symbol) DO NOTHING",
+        (symbol, now_iso()),
+    )
+    return True
+
+
+def remove_benchmark(conn, symbol: str) -> None:
+    symbol = (symbol or "").strip().upper()
+    conn.execute("DELETE FROM benchmarks WHERE symbol = ?", (symbol,))
+    conn.execute("DELETE FROM benchmark_prices WHERE symbol = ?", (symbol,))
+
+
+def refresh_benchmarks(conn) -> None:
+    """Refresh history for every registered benchmark (called on the daily job)."""
+    for symbol in list_benchmarks(conn):
+        refresh_benchmark_history(conn, symbol)
+
+
+def fetch_daily_equity_series(conn, is_paper: int, days: int | None = None) -> list[dict]:
+    """
+    One portfolio total per calendar day: for each day, take each account's last
+    snapshot and sum across accounts. Accounts with no snapshot on a given day are
+    simply absent from that day's sum (correct for accounts added later).
+    """
+    where_days = ""
+    params: list = [is_paper]
+    if days:
+        where_days = "AND date(avs.snapshot_at) >= date('now', ?)"
+        params.append(f"-{int(days)} days")
+    rows = conn.execute(
+        f"""
+        WITH daily AS (
+            SELECT
+                date(avs.snapshot_at) AS d,
+                avs.account_id,
+                avs.total_value,
+                ROW_NUMBER() OVER (
+                    PARTITION BY date(avs.snapshot_at), avs.account_id
+                    ORDER BY avs.snapshot_at DESC
+                ) AS rn
+            FROM account_value_snapshots avs
+            JOIN accounts a ON a.id = avs.account_id
+            WHERE a.is_paper = ? {where_days}
+        )
+        SELECT d, SUM(total_value) AS total_value
+        FROM daily
+        WHERE rn = 1
+        GROUP BY d
+        ORDER BY d
+        """,
+        params,
+    ).fetchall()
+    return [{"date": r["d"], "value": r["total_value"]} for r in rows]
+
+
+def fetch_aligned_benchmark_series(conn, symbol: str, dates: list[str]) -> list[float | None]:
+    """
+    Return one close per date in `dates`, carrying the most recent prior close
+    forward across non-trading days. None for dates before the benchmark's first
+    available close.
+    """
+    pricemap = {
+        r["date"]: r["close"]
+        for r in conn.execute(
+            "SELECT date, close FROM benchmark_prices WHERE symbol = ?", (symbol,)
+        ).fetchall()
+    }
+    bdates = sorted(pricemap)
+    out: list[float | None] = []
+    for d in dates:
+        i = bisect.bisect_right(bdates, d) - 1
+        out.append(pricemap[bdates[i]] if i >= 0 else None)
+    return out

@@ -16,6 +16,7 @@ from db import (
     upsert_account,
     replace_positions,
     refresh_prices,
+    refresh_benchmarks,
     recompute_account_total,
     insert_account_value_snapshot,
 )
@@ -185,6 +186,12 @@ def run_sync(force: bool = False, snapshot_kind: str | None = None):
         for acct_id in acct_ids:
             recompute_account_total(conn, acct_id)
             insert_account_value_snapshot(conn, acct_id, snapshot_at)
+
+        # Benchmark history is daily data — refresh it once a day on the
+        # pre_open job rather than every 15-minute sync.
+        if snapshot_kind == "pre_open":
+            print("  refreshing benchmark history...")
+            refresh_benchmarks(conn)
 
         if should_prune:
             prune_orphaned(conn, live_connection_ids, live_account_ids)
