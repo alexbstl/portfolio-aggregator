@@ -5,6 +5,7 @@ changes early on, just delete portfolio.db and re-sync.
 """
 import sqlite3
 import bisect
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -501,19 +502,33 @@ def _earliest_snapshot_date(conn) -> str | None:
     return row[0] if row and row[0] else None
 
 
-def refresh_benchmark_history(conn, symbol: str) -> bool:
+def refresh_benchmark_history(conn, symbol: str, retries: int = 2) -> bool:
     """
     Pull daily close history for `symbol` from Yahoo Finance, from the earliest
     account snapshot date (so the comparison covers the full portfolio history)
-    to today, and upsert into benchmark_prices. Idempotent. Returns True if any
-    rows were written. Network/parse failures are swallowed and return False.
+    to today, and upsert into benchmark_prices. Idempotent.
+
+    Yahoo throttles yfinance often, so the fetch is retried with a short backoff.
+    If all attempts raise, the last exception is re-raised so callers can
+    distinguish a transient fetch failure from a valid-but-empty result.
+    Returns True if rows were written, False if the symbol resolved no data
+    (likely an invalid ticker).
     """
     start = _earliest_snapshot_date(conn)
-    try:
-        tk = yf.Ticker(symbol)
-        hist = tk.history(start=start) if start else tk.history(period="1y")
-    except Exception:
-        return False
+    hist = None
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            tk = yf.Ticker(symbol)
+            hist = tk.history(start=start) if start else tk.history(period="1y")
+            last_exc = None
+            break
+        except Exception as e:
+            last_exc = e
+            if attempt < retries:
+                time.sleep(0.5 * (attempt + 1))
+    if last_exc is not None:
+        raise last_exc
     if hist is None or hist.empty:
         return False
     wrote = False
@@ -561,9 +576,13 @@ def remove_benchmark(conn, symbol: str) -> None:
 
 
 def refresh_benchmarks(conn) -> None:
-    """Refresh history for every registered benchmark (called on the daily job)."""
+    """Refresh history for every registered benchmark (called on the daily job).
+    Per-symbol failures are swallowed so one bad fetch can't abort the sync."""
     for symbol in list_benchmarks(conn):
-        refresh_benchmark_history(conn, symbol)
+        try:
+            refresh_benchmark_history(conn, symbol)
+        except Exception as e:
+            print(f"  benchmark refresh failed for {symbol}: {e}")
 
 
 def fetch_daily_equity_series(conn, is_paper: int, days: int | None = None) -> list[dict]:

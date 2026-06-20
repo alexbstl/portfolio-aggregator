@@ -197,11 +197,18 @@ def api_benchmarks_add(payload: dict):
     symbol = (payload.get("symbol") or "").strip().upper()
     if not symbol:
         return {"error": "symbol required"}
-    with db() as conn:
-        ok = add_benchmark(conn, symbol)
-        if not ok:
-            return {"error": f"could not resolve '{symbol}' on Yahoo Finance"}
-        return {"benchmarks": list_benchmarks(conn)}
+    try:
+        with db() as conn:
+            ok = add_benchmark(conn, symbol)
+            benchmarks = list_benchmarks(conn) if ok else None
+    except Exception as e:
+        # Transient Yahoo/yfinance failure (rate limit, network). Surface a
+        # clear message instead of an opaque 500 so the UI can show it.
+        print(f"benchmark add error for {symbol}: {e}")
+        return {"error": f"Yahoo fetch for '{symbol}' failed — try again"}
+    if not ok:
+        return {"error": f"could not resolve '{symbol}' on Yahoo Finance"}
+    return {"benchmarks": benchmarks}
 
 
 @app.delete("/api/benchmarks/{symbol}")
