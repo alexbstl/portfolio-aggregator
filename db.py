@@ -695,10 +695,16 @@ _OPTION_MA_TYPES = {
 }
 
 
-def upsert_activity(conn, a: dict) -> None:
-    """Insert one SnapTrade activity. Immutable, so existing rows are left as-is."""
-    aid = a.get("id")
-    acct_id = _safe(a, "account", "id")
+def upsert_activity(conn, a: dict, account_id: str | None = None) -> None:
+    """
+    Insert one SnapTrade activity. Immutable, so existing rows are left as-is.
+
+    `account_id` should be passed by the caller: the account-level activities
+    endpoint returns activities WITHOUT a nested `account` object, so we can't
+    rely on a['account']['id']. Falls back to the nested field when not given.
+    """
+    aid = a.get("id") or a.get("external_reference_id")
+    acct_id = account_id or _safe(a, "account", "id")
     if not aid or not acct_id:
         return
     conn.execute(

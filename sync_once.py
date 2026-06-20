@@ -95,7 +95,7 @@ def sync_activities(conn, account_ids: list[str]) -> int:
             continue
         for a in acts:
             try:
-                upsert_activity(conn, a)
+                upsert_activity(conn, a, acct_id)
             except Exception:
                 continue
         total += len(acts)
@@ -155,6 +155,7 @@ def run_sync(force: bool = False, snapshot_kind: str | None = None):
 
     if force and connections:
         print(f"  forcing broker refresh on {len(connections)} connection(s)...")
+        any_refreshed = False
         for c in connections:
             cid = c["id"]
             name = c["brokerage"]["display_name"]
@@ -164,12 +165,18 @@ def run_sync(force: bool = False, snapshot_kind: str | None = None):
                     user_id=USER_ID,
                     user_secret=USER_SECRET,
                 )
+                any_refreshed = True
                 print(f"    {name}: refresh requested")
             except Exception as e:
                 print(f"    {name}: refresh error {e}")
-        # Give brokers a moment to respond before we re-fetch
-        print("  waiting 15s for brokers to respond...")
-        time.sleep(15)
+        # Only wait if a refresh was actually accepted. On a real-time SnapTrade
+        # plan, manual refresh is forbidden (403/1141) and pointless — the data
+        # endpoints already return live data — so skip the wait entirely.
+        if any_refreshed:
+            print("  waiting 15s for brokers to respond...")
+            time.sleep(15)
+        else:
+            print("  manual refresh unavailable (real-time plan) — skipping wait")
 
 
     print("  fetching accounts...")
@@ -215,12 +222,17 @@ def run_sync(force: bool = False, snapshot_kind: str | None = None):
             try:
                 positions = fetch_positions(acct_id)
             except Exception as e:
-                print(f"    positions error: {e}")
-                positions = []
+                # A transient fetch failure must NOT wipe the account's positions.
+                # Doing so would recompute total_value as cash-only and write a
+                # false dip into the equity curve. Keep the prior positions and
+                # skip this account's snapshot for this cycle instead.
+                print(f"    positions error: {e} — keeping previous positions, skipping snapshot")
+                positions = None
 
-            print(f"    {len(positions)} positions")
-            replace_positions(conn, acct_id, positions, snapshot_at,
-                              snapshot_kind=snapshot_kind)
+            if positions is not None:
+                print(f"    {len(positions)} positions")
+                replace_positions(conn, acct_id, positions, snapshot_at,
+                                  snapshot_kind=snapshot_kind)
 
         # Refresh external prices for all live symbols before recomputing totals
         symbols = [
