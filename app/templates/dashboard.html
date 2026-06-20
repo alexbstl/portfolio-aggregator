@@ -236,6 +236,11 @@
 
     <h2>Performance</h2>
     <div class="perf-controls">
+        <div class="group">
+            <select id="perf-account">
+                <option value="">All accounts</option>
+            </select>
+        </div>
         <div class="group" id="perf-mode">
             <button class="seg active" data-mode="pct">% Return</button>
             <button class="seg" data-mode="dollar">$ Value</button>
@@ -245,6 +250,11 @@
             <button class="seg" data-days="90">90D</button>
             <button class="seg active" data-days="365">1Y</button>
             <button class="seg" data-days="0">All</button>
+        </div>
+        <div class="group">
+            <label style="color:#666;">From</label>
+            <input id="perf-start" type="date">
+            <button class="seg" id="perf-start-clear" title="Clear start date">×</button>
         </div>
         <div class="group" id="bench-chips"></div>
         <div class="group bench-add">
@@ -260,6 +270,10 @@
 
     <script>
         const IS_PAPER = {{ 'true' if is_paper_view else 'false' }};
+        const ACCOUNTS = [
+            {% for a in accounts %}{ id: {{ a.id|tojson }}, name: {{ (a.name or a.id)|tojson }} }{% if not loop.last %},{% endif %}
+            {% endfor %}
+        ];
     </script>
     <script>
         function formatRelative(iso) {
@@ -437,13 +451,18 @@
 
         // ----- Performance chart -----
         const PERF_COLORS = ['#2563eb', '#0a7c2a', '#c0392b', '#b7791f', '#7c3aed', '#0891b2'];
-        let perfState = { mode: 'pct', days: 365, data: null };
+        let perfState = { mode: 'pct', days: 365, start: null, account: null, data: null };
         let perfChart = null;
 
         async function fetchPerformance() {
-            const days = perfState.days;
-            const qs = `paper=${IS_PAPER}` + (days ? `&days=${days}` : '');
-            const res = await fetch('/api/performance?' + qs);
+            const params = new URLSearchParams({ paper: IS_PAPER });
+            if (perfState.start) {
+                params.set('start', perfState.start);   // start overrides range
+            } else if (perfState.days) {
+                params.set('days', perfState.days);
+            }
+            if (perfState.account) params.set('account', perfState.account);
+            const res = await fetch('/api/performance?' + params.toString());
             if (!res.ok) return null;
             return await res.json();
         }
@@ -596,6 +615,19 @@
         }
 
         function initPerfControls() {
+            // Populate account selector for the current view (real vs paper).
+            const acctSel = document.getElementById('perf-account');
+            for (const a of ACCOUNTS) {
+                const opt = document.createElement('option');
+                opt.value = a.id;
+                opt.textContent = a.name;
+                acctSel.appendChild(opt);
+            }
+            acctSel.addEventListener('change', () => {
+                perfState.account = acctSel.value || null;
+                loadPerformance();
+            });
+
             document.querySelectorAll('#perf-mode .seg').forEach(b => {
                 b.onclick = () => {
                     document.querySelectorAll('#perf-mode .seg').forEach(x => x.classList.remove('active'));
@@ -604,14 +636,37 @@
                     renderPerfChart();
                 };
             });
+
+            const startInput = document.getElementById('perf-start');
             document.querySelectorAll('#perf-range .seg').forEach(b => {
                 b.onclick = () => {
                     document.querySelectorAll('#perf-range .seg').forEach(x => x.classList.remove('active'));
                     b.classList.add('active');
                     perfState.days = parseInt(b.dataset.days, 10);
+                    perfState.start = null;       // range and explicit start are exclusive
+                    startInput.value = '';
                     loadPerformance();
                 };
             });
+
+            startInput.addEventListener('change', () => {
+                perfState.start = startInput.value || null;
+                if (perfState.start) {
+                    document.querySelectorAll('#perf-range .seg').forEach(x => x.classList.remove('active'));
+                }
+                loadPerformance();
+            });
+            document.getElementById('perf-start-clear').onclick = () => {
+                startInput.value = '';
+                perfState.start = null;
+                // fall back to the All range
+                document.querySelectorAll('#perf-range .seg').forEach(x => x.classList.remove('active'));
+                const allBtn = document.querySelector('#perf-range .seg[data-days="0"]');
+                if (allBtn) allBtn.classList.add('active');
+                perfState.days = 0;
+                loadPerformance();
+            };
+
             document.getElementById('bench-add-btn').onclick = addBench;
             document.getElementById('bench-input').addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') addBench();

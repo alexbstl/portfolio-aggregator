@@ -168,12 +168,14 @@ def api_history(days: int | None = None):
 
 
 @app.get("/api/performance")
-def api_performance(paper: bool = False, days: int | None = None):
+def api_performance(paper: bool = False, days: int | None = None,
+                    start: str | None = None, account: str | None = None):
     """Daily portfolio equity series plus each benchmark's close aligned to the
-    same dates. Frontend normalizes to % or $ at display time."""
+    same dates. `start` (YYYY-MM-DD) clips the series and overrides days;
+    `account` restricts to a single account. Frontend normalizes at display time."""
     is_paper_flag = 1 if paper else 0
     with db() as conn:
-        series = fetch_daily_equity_series(conn, is_paper_flag, days)
+        series = fetch_daily_equity_series(conn, is_paper_flag, days, start, account)
         dates = [p["date"] for p in series]
         benchmarks = {
             sym: fetch_aligned_benchmark_series(conn, sym, dates)

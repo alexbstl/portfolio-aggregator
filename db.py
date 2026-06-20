@@ -629,16 +629,27 @@ def refresh_benchmarks(conn) -> None:
             print(f"  benchmark refresh failed for {symbol}: {e}")
 
 
-def fetch_daily_equity_series(conn, is_paper: int, days: int | None = None) -> list[dict]:
+def fetch_daily_equity_series(conn, is_paper: int, days: int | None = None,
+                              start: str | None = None,
+                              account_id: str | None = None) -> list[dict]:
     """
     One portfolio total per calendar day: for each day, take each account's last
     snapshot and sum across accounts. Accounts with no snapshot on a given day are
     simply absent from that day's sum (correct for accounts added later).
+
+    `start` (YYYY-MM-DD) clips the series to that date onward and takes precedence
+    over `days`. `account_id` restricts the series to a single account.
     """
     where_days = ""
     params: list = [is_paper]
-    if days:
-        where_days = "AND date(avs.snapshot_at) >= date('now', ?)"
+    if account_id:
+        where_days += " AND avs.account_id = ?"
+        params.append(account_id)
+    if start:
+        where_days += " AND date(avs.snapshot_at) >= ?"
+        params.append(start)
+    elif days:
+        where_days += " AND date(avs.snapshot_at) >= date('now', ?)"
         params.append(f"-{int(days)} days")
     rows = conn.execute(
         f"""
