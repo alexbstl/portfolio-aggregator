@@ -474,22 +474,37 @@
             return -1;
         }
 
-        // Normalize a raw series for display. pct: indexed to 0% at its first
-        // point. dollar: portfolio shown raw; a benchmark is scaled so it starts
-        // at the portfolio's starting dollar value ("same $ invested in SPY").
-        function transformSeries(raw, mode, portfolioRaw) {
+        // Index to normalize against: the first value that is a meaningful
+        // positive (>= 1% of the series max). Anchoring on the literal first
+        // point breaks for reconstructed curves that start near $0 — dividing
+        // by ~0 explodes the %, and a slightly-negative start flips the sign.
+        function baseIndexFor(arr) {
+            let mx = 0;
+            for (const v of arr) if (v != null && v > mx) mx = v;
+            const floor = mx * 0.01;
+            for (let i = 0; i < arr.length; i++) {
+                if (arr[i] != null && arr[i] > 0 && arr[i] >= floor) return i;
+            }
+            return firstNonNullIndex(arr);
+        }
+
+        // Normalize a raw series for display, anchored on a shared baseIdx so all
+        // lines start together. pct: indexed to 0% at baseIdx. dollar: portfolio
+        // shown raw; a benchmark is scaled to the portfolio's value at baseIdx
+        // ("same $ invested in SPY at the start").
+        function transformSeries(raw, mode, portfolioRaw, baseIdx) {
             if (mode === 'pct') {
-                const i = firstNonNullIndex(raw);
-                if (i < 0) return raw.map(() => null);
-                const base = raw[i];
-                return raw.map(v => (v == null) ? null : (v / base - 1) * 100);
+                const base = raw[baseIdx];
+                if (base == null || base <= 0) return raw.map(() => null);
+                return raw.map((v, idx) =>
+                    (v == null || idx < baseIdx) ? null : (v / base - 1) * 100);
             }
             if (raw === portfolioRaw) return raw.slice();
-            const pi = firstNonNullIndex(portfolioRaw);
-            if (pi < 0) return raw.map(() => null);
-            const pBase = portfolioRaw[pi];
-            const bBase = raw[pi] ?? raw[firstNonNullIndex(raw)];
-            if (!bBase) return raw.map(() => null);
+            const pBase = portfolioRaw[baseIdx];
+            const bBase = raw[baseIdx];
+            if (pBase == null || pBase <= 0 || bBase == null || bBase <= 0) {
+                return raw.map(() => null);
+            }
             return raw.map(v => (v == null) ? null : pBase * (v / bBase));
         }
 
@@ -514,18 +529,19 @@
 
             const mode = perfState.mode;
             const fmt = perfFormatter();
+            const baseIdx = baseIndexFor(d.portfolio);  // shared anchor for all series
             const datasets = [];
             let ci = 0;
             datasets.push({
                 label: 'Portfolio',
-                data: transformSeries(d.portfolio, mode, d.portfolio),
+                data: transformSeries(d.portfolio, mode, d.portfolio, baseIdx),
                 borderColor: PERF_COLORS[ci++ % PERF_COLORS.length],
                 borderWidth: 2, pointRadius: 0, tension: 0.1, spanGaps: true,
             });
             for (const sym of Object.keys(d.benchmarks)) {
                 datasets.push({
                     label: sym,
-                    data: transformSeries(d.benchmarks[sym], mode, d.portfolio),
+                    data: transformSeries(d.benchmarks[sym], mode, d.portfolio, baseIdx),
                     borderColor: PERF_COLORS[ci++ % PERF_COLORS.length],
                     borderWidth: 1.5, pointRadius: 0, tension: 0.1, spanGaps: true,
                     borderDash: [4, 3],
