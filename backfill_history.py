@@ -62,10 +62,12 @@ def main():
         if report["skipped_option_ma"]:
             print(f"    option/merger events skipped in share math: "
                   f"{report['skipped_option_ma']}")
-        if report["holdings_residual"]:
-            print(f"    ⚠ holdings residual (should be empty): {report['holdings_residual']}")
-        else:
-            print(f"    ✓ holdings reconcile to current positions")
+        if report["seeded_opening"]:
+            print(f"    seeded opening holdings (transfers / pre-window lots): "
+                  f"{report['seeded_opening']}")
+        if report["opening_unpriceable"]:
+            print(f"    ⚠ opening lots we can't price (value still missing): "
+                  f"{', '.join(report['opening_unpriceable'])}")
         cr = report["cash_residual"]
         flag = "✓" if abs(cr) < 1.0 else "⚠"
         print(f"    {flag} cash residual: {cr}")

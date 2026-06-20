@@ -707,6 +707,13 @@ _OPTION_MA_TYPES = {
     "OPTIONEXPIRATION", "OPTIONASSIGNMENT", "OPTIONEXERCISE", "MA",
 }
 
+# Money-market / sweep funds hold a constant $1.00 NAV but have no Yahoo price.
+# Value them at $1 instead of treating them as unpriceable (worth $0).
+_CASH_EQUIVALENT_SYMBOLS = {
+    "FDRXX", "SPAXX", "FZFXX", "SWVXX", "VMFXX", "SPRXX", "SNVXX", "SNAXX",
+    "SCHFDX0", "VMRXX", "FNSXX",
+}
+
 
 def upsert_activity(conn, a: dict, account_id: str | None = None) -> None:
     """
@@ -828,6 +835,8 @@ def reconstruct_account_history(conn, account_id: str, end_date: str | None = No
     splits: dict[str, list] = {}
     unpriceable: list[str] = []
     for sym in symbols:
+        if sym in _CASH_EQUIVALENT_SYMBOLS:
+            continue  # priced at $1.00 in price_on; no history fetch needed
         c, sp = _load_symbol_prices(sym, start_date)
         if not c:
             unpriceable.append(sym)
@@ -851,6 +860,8 @@ def reconstruct_account_history(conn, account_id: str, end_date: str | None = No
     sorted_dates = {sym: sorted(closes[sym]) for sym in closes}
 
     def price_on(sym: str, d: str):
+        if sym in _CASH_EQUIVALENT_SYMBOLS:
+            return 1.0
         ds = sorted_dates.get(sym)
         if not ds:
             return None
@@ -866,6 +877,23 @@ def reconstruct_account_history(conn, account_id: str, end_date: str | None = No
         td = (a["trade_date"] or "")[:10]
         a["adj_units"] = (a["units"] or 0.0) * (split_factor(sym, td) if sym else 1.0)
 
+    # Net in-window activity per symbol (today's split-adjusted terms).
+    replayed_units: dict[str, float] = {}
+    for a in acts:
+        if a["symbol"] and a["type"] not in _OPTION_MA_TYPES:
+            replayed_units[a["symbol"]] = replayed_units.get(a["symbol"], 0.0) + a["adj_units"]
+
+    # Opening holdings: what must have been held at the window start to reconcile
+    # to today's positions. This captures shares transferred in or acquired before
+    # SnapTrade's transaction window — otherwise the curve understates them. Held-
+    # since-2015 accumulation accounts get an opening near zero; transfer-funded
+    # accounts get their transferred lots seeded at the window start.
+    opening: dict[str, float] = {}
+    for sym in set(current_positions) | set(replayed_units):
+        op = current_positions.get(sym, 0.0) - replayed_units.get(sym, 0.0)
+        if abs(op) > 1e-6:
+            opening[sym] = op
+
     # Clear any prior reconstruction for this account.
     conn.execute(
         "DELETE FROM account_value_snapshots WHERE account_id = ? AND source = 'reconstructed'",
@@ -876,7 +904,7 @@ def reconstruct_account_history(conn, account_id: str, end_date: str | None = No
     all_dates = sorted({
         d for sym in closes for d in closes[sym] if start_date <= d <= end_date
     })
-    holdings: dict[str, float] = {}
+    holdings: dict[str, float] = dict(opening)  # seed with pre-window holdings
     cash = current_cash - sum((a["amount"] or 0.0) for a in acts)  # cash before first activity
     ai, n = 0, len(acts)
     for D in all_dates:
@@ -902,16 +930,10 @@ def reconstruct_account_history(conn, account_id: str, end_date: str | None = No
             (f"{D}T21:00:00+00:00", account_id, mv + cash, cash, None, None),
         )
 
-    # Validation: forward replay should land on today's known holdings & cash.
-    replayed_units: dict[str, float] = {}
-    for a in acts:
-        if a["symbol"] and a["type"] not in _OPTION_MA_TYPES:
-            replayed_units[a["symbol"]] = replayed_units.get(a["symbol"], 0.0) + a["adj_units"]
-    holdings_residual = {}
-    for sym in set(current_positions) | set(replayed_units):
-        diff = current_positions.get(sym, 0.0) - replayed_units.get(sym, 0.0)
-        if abs(diff) > 0.01:
-            holdings_residual[sym] = round(diff, 4)
+    # Holdings now reconcile to current by construction (opening + replayed).
+    # The honest caveat is opening lots we couldn't price: their value is still
+    # missing from the early curve.
+    opening_unpriceable = sorted(s for s in opening if s in unpriceable)
 
     return {
         "status": "ok",
@@ -922,6 +944,9 @@ def reconstruct_account_history(conn, account_id: str, end_date: str | None = No
         "activities": n,
         "unpriceable_symbols": unpriceable,
         "skipped_option_ma": sum(1 for a in acts if a["type"] in _OPTION_MA_TYPES),
-        "holdings_residual": holdings_residual,   # should be ~empty if complete
+        # Pre-window holdings assumed held from start_date (transfers / old lots):
+        "seeded_opening": {s: round(v, 4) for s, v in opening.items()},
+        # Of those, the ones we can't price (value still missing from the curve):
+        "opening_unpriceable": opening_unpriceable,
         "cash_residual": round(current_cash - cash, 2),  # should be ~0
     }
