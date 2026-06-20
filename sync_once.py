@@ -17,6 +17,7 @@ from db import (
     replace_positions,
     refresh_prices,
     refresh_benchmarks,
+    upsert_activity,
     recompute_account_total,
     insert_account_value_snapshot,
 )
@@ -53,6 +54,53 @@ def fetch_balances(account_id: str):
     return client.account_information.get_user_account_balance(
         user_id=USER_ID, user_secret=USER_SECRET, account_id=account_id
     ).body
+
+
+def fetch_account_activities(account_id: str, page_size: int = 1000) -> list[dict]:
+    """
+    Page through the account-level activities endpoint (the non-deprecated
+    replacement for transactions_and_reporting.get_activities) and return all
+    activity dicts for the account.
+    """
+    out: list[dict] = []
+    offset = 0
+    while True:
+        resp = client.account_information.get_account_activities(
+            user_id=USER_ID,
+            user_secret=USER_SECRET,
+            account_id=account_id,
+            offset=offset,
+            limit=page_size,
+        ).body
+        # Response may be a bare list or a paginated object {data: [...]}.
+        if isinstance(resp, dict):
+            items = resp.get("data") or resp.get("activities") or []
+        else:
+            items = resp or []
+        out.extend(items)
+        if len(items) < page_size:
+            break
+        offset += page_size
+    return out
+
+
+def sync_activities(conn, account_ids: list[str]) -> int:
+    """Ingest transaction history for each account into the activities table."""
+    total = 0
+    for acct_id in account_ids:
+        try:
+            acts = fetch_account_activities(acct_id)
+        except Exception as e:
+            print(f"  activities error for {acct_id}: {e}")
+            continue
+        for a in acts:
+            try:
+                upsert_activity(conn, a)
+            except Exception:
+                continue
+        total += len(acts)
+        print(f"  activities: {acct_id} -> {len(acts)}")
+    return total
 
 
 def prune_orphaned(conn, live_connection_ids: set[str], live_account_ids: set[str]) -> None:
@@ -187,11 +235,13 @@ def run_sync(force: bool = False, snapshot_kind: str | None = None):
             recompute_account_total(conn, acct_id)
             insert_account_value_snapshot(conn, acct_id, snapshot_at)
 
-        # Benchmark history is daily data — refresh it once a day on the
-        # pre_open job rather than every 15-minute sync.
+        # Benchmark history and transaction activities are daily data — refresh
+        # them once a day on the pre_open job rather than every 15-minute sync.
         if snapshot_kind == "pre_open":
             print("  refreshing benchmark history...")
             refresh_benchmarks(conn)
+            print("  ingesting transaction activities...")
+            sync_activities(conn, acct_ids)
 
         if should_prune:
             prune_orphaned(conn, live_connection_ids, live_account_ids)

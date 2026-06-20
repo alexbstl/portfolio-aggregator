@@ -11,7 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy app code. Note: register.py, connect.py, fetch.py are dev tools
 # and don't need to be in the image, but they're harmless if included.
-COPY db.py sync_once.py ./
+# backfill_history.py is included so it can be run via `docker exec`.
+COPY db.py sync_once.py backfill_history.py ./
 COPY app/ ./app/
 
 # Data dir is a mounted volume; sqlite db lives here

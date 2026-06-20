@@ -124,6 +124,35 @@ CREATE TABLE IF NOT EXISTS prices (
     as_of       TEXT
 );
 
+-- Raw transaction/activity history from SnapTrade. Immutable historical
+-- records; also the foundation for realized-P&L. Used to reconstruct the
+-- equity curve for the period before the app started taking snapshots.
+CREATE TABLE IF NOT EXISTS activities (
+    id              TEXT PRIMARY KEY,    -- SnapTrade activity UUID
+    account_id      TEXT NOT NULL,
+    type            TEXT NOT NULL,       -- BUY/SELL/REI/DIVIDEND/CONTRIBUTION/...
+    symbol          TEXT,                -- ticker; NULL for pure-cash events
+    trade_date      TEXT,
+    settlement_date TEXT,
+    units           REAL,                -- signed
+    price           REAL,
+    amount          REAL,                -- signed cash impact
+    fee             REAL,
+    option_ticker   TEXT,                -- option_symbol.ticker when present
+    description     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_activities_acct_date
+    ON activities(account_id, trade_date);
+
+-- Daily close history used by reconstruction (raw closes, not dividend-adjusted).
+CREATE TABLE IF NOT EXISTS price_history (
+    symbol  TEXT NOT NULL,
+    date    TEXT NOT NULL,               -- YYYY-MM-DD
+    close   REAL NOT NULL,
+    PRIMARY KEY (symbol, date)
+);
+
 -- Benchmark symbols the user has chosen to compare against (e.g. SPY, QQQ).
 CREATE TABLE IF NOT EXISTS benchmarks (
     symbol      TEXT PRIMARY KEY,
@@ -146,6 +175,7 @@ CREATE TABLE IF NOT EXISTS account_value_snapshots (
     cash                    REAL,
     long_market_value       REAL,                -- sum of positive market_value
     short_market_value      REAL,                -- sum of negative market_value
+    source                  TEXT DEFAULT 'live', -- 'live' | 'reconstructed'
     PRIMARY KEY (snapshot_at, account_id),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
@@ -164,6 +194,18 @@ def init_db():
             cols = {row[1] for row in conn.execute("PRAGMA table_info(position_snapshots)")}
             if "snapshot_kind" not in cols:
                 conn.execute("ALTER TABLE position_snapshots ADD COLUMN snapshot_kind TEXT")
+
+        # Migration: tag account_value_snapshots with their source so live and
+        # reconstructed (backfilled) points can coexist and be told apart.
+        avs = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='account_value_snapshots'"
+        ).fetchone()
+        if avs:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(account_value_snapshots)")}
+            if "source" not in cols:
+                conn.execute(
+                    "ALTER TABLE account_value_snapshots ADD COLUMN source TEXT DEFAULT 'live'"
+                )
         conn.executescript(SCHEMA)
 
 
@@ -605,7 +647,8 @@ def fetch_daily_equity_series(conn, is_paper: int, days: int | None = None) -> l
                 avs.total_value,
                 ROW_NUMBER() OVER (
                     PARTITION BY date(avs.snapshot_at), avs.account_id
-                    ORDER BY avs.snapshot_at DESC
+                    -- on a day with both, prefer the live snapshot over reconstructed
+                    ORDER BY (avs.source = 'live') DESC, avs.snapshot_at DESC
                 ) AS rn
             FROM account_value_snapshots avs
             JOIN accounts a ON a.id = avs.account_id
@@ -640,3 +683,223 @@ def fetch_aligned_benchmark_series(conn, symbol: str, dates: list[str]) -> list[
         i = bisect.bisect_right(bdates, d) - 1
         out.append(pricemap[bdates[i]] if i >= 0 else None)
     return out
+
+
+# ---------- transaction history & reconstruction ----------
+
+# Activity types that don't map cleanly onto equity share counts: option events
+# carry contract (not share) units, and mergers are share-for-share swaps the
+# generic rule can't reverse. We skip their share math and report the residual.
+_OPTION_MA_TYPES = {
+    "OPTIONEXPIRATION", "OPTIONASSIGNMENT", "OPTIONEXERCISE", "MA",
+}
+
+
+def upsert_activity(conn, a: dict) -> None:
+    """Insert one SnapTrade activity. Immutable, so existing rows are left as-is."""
+    aid = a.get("id")
+    acct_id = _safe(a, "account", "id")
+    if not aid or not acct_id:
+        return
+    conn.execute(
+        """
+        INSERT INTO activities (
+            id, account_id, type, symbol, trade_date, settlement_date,
+            units, price, amount, fee, option_ticker, description
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO NOTHING
+        """,
+        (
+            aid,
+            acct_id,
+            a.get("type") or "?",
+            _safe(a, "symbol", "symbol"),
+            a.get("trade_date"),
+            a.get("settlement_date"),
+            a.get("units"),
+            a.get("price"),
+            a.get("amount"),
+            a.get("fee"),
+            _safe(a, "option_symbol", "ticker"),
+            a.get("description"),
+        ),
+    )
+
+
+def _load_symbol_prices(symbol: str, start: str, retries: int = 2):
+    """
+    Return (closes, splits) for a symbol from Yahoo Finance:
+      closes: {date 'YYYY-MM-DD' -> raw close}   (NOT dividend-adjusted)
+      splits: [(date, ratio), ...]
+    ({}, []) on failure / no data.
+    """
+    hist = splits = None
+    for attempt in range(retries + 1):
+        try:
+            tk = yf.Ticker(symbol)
+            hist = tk.history(start=start, auto_adjust=False)
+            splits = tk.splits
+            break
+        except Exception:
+            if attempt < retries:
+                time.sleep(0.5 * (attempt + 1))
+            else:
+                return {}, []
+    if hist is None or hist.empty:
+        return {}, []
+    closes: dict[str, float] = {}
+    for idx, row in hist.iterrows():
+        try:
+            closes[idx.strftime("%Y-%m-%d")] = float(row["Close"])
+        except Exception:
+            continue
+    sp: list[tuple[str, float]] = []
+    try:
+        for idx, ratio in splits.items():
+            sp.append((idx.strftime("%Y-%m-%d"), float(ratio)))
+    except Exception:
+        pass
+    return closes, sp
+
+
+def reconstruct_account_history(conn, account_id: str, end_date: str | None = None) -> dict:
+    """
+    Reconstruct a daily equity curve for the period before live snapshots, by
+    replaying this account's activities forward in today's split-adjusted share
+    terms and valuing holdings with historical closes.
+
+    Writes one `source='reconstructed'` row per trading day into
+    account_value_snapshots (existing reconstructed rows for this account are
+    cleared first). Returns a validation report; check holdings_residual and
+    cash_residual to judge how trustworthy the curve is.
+    """
+    if end_date is None:
+        end_date = datetime.now(timezone.utc).date().isoformat()
+
+    current_positions = {
+        r["symbol"]: r["units"]
+        for r in conn.execute(
+            "SELECT symbol, units FROM positions WHERE account_id = ?", (account_id,)
+        ).fetchall()
+    }
+    acct = conn.execute(
+        "SELECT cash FROM accounts WHERE id = ?", (account_id,)
+    ).fetchone()
+    current_cash = (acct["cash"] if acct and acct["cash"] is not None else 0.0)
+
+    acts = [
+        dict(r) for r in conn.execute(
+            "SELECT * FROM activities WHERE account_id = ? ORDER BY date(trade_date) ASC",
+            (account_id,),
+        ).fetchall()
+    ]
+    if not acts:
+        return {"status": "no_activities", "account_id": account_id}
+
+    start_date = (acts[0]["trade_date"] or end_date)[:10]
+
+    symbols = {s for s in current_positions if s} | {
+        a["symbol"] for a in acts if a["symbol"]
+    }
+
+    closes: dict[str, dict] = {}
+    splits: dict[str, list] = {}
+    unpriceable: list[str] = []
+    for sym in symbols:
+        c, sp = _load_symbol_prices(sym, start_date)
+        if not c:
+            unpriceable.append(sym)
+            continue
+        closes[sym] = c
+        splits[sym] = sp
+        for d, px in c.items():
+            conn.execute(
+                "INSERT INTO price_history (symbol, date, close) VALUES (?, ?, ?) "
+                "ON CONFLICT(symbol, date) DO UPDATE SET close = excluded.close",
+                (sym, d, px),
+            )
+
+    def split_factor(sym: str, d: str) -> float:
+        f = 1.0
+        for sd, ratio in splits.get(sym, []):
+            if sd > d:
+                f *= ratio
+        return f
+
+    sorted_dates = {sym: sorted(closes[sym]) for sym in closes}
+
+    def price_on(sym: str, d: str):
+        ds = sorted_dates.get(sym)
+        if not ds:
+            return None
+        i = bisect.bisect_right(ds, d) - 1
+        if i < 0:
+            return None
+        ref = ds[i]
+        return closes[sym][ref] / split_factor(sym, ref)
+
+    # Express each trade's units in today's split-adjusted terms.
+    for a in acts:
+        sym = a["symbol"]
+        td = (a["trade_date"] or "")[:10]
+        a["adj_units"] = (a["units"] or 0.0) * (split_factor(sym, td) if sym else 1.0)
+
+    # Clear any prior reconstruction for this account.
+    conn.execute(
+        "DELETE FROM account_value_snapshots WHERE account_id = ? AND source = 'reconstructed'",
+        (account_id,),
+    )
+
+    # Forward replay across trading days, valuing holdings each day.
+    all_dates = sorted({
+        d for sym in closes for d in closes[sym] if start_date <= d <= end_date
+    })
+    holdings: dict[str, float] = {}
+    cash = current_cash - sum((a["amount"] or 0.0) for a in acts)  # cash before first activity
+    ai, n = 0, len(acts)
+    for D in all_dates:
+        while ai < n and (acts[ai]["trade_date"] or "")[:10] <= D:
+            a = acts[ai]
+            ai += 1
+            cash += (a["amount"] or 0.0)
+            if a["symbol"] and a["type"] not in _OPTION_MA_TYPES:
+                holdings[a["symbol"]] = holdings.get(a["symbol"], 0.0) + a["adj_units"]
+        mv = 0.0
+        for sym, u in holdings.items():
+            px = price_on(sym, D)
+            if px is not None:
+                mv += u * px
+        conn.execute(
+            """
+            INSERT INTO account_value_snapshots (
+                snapshot_at, account_id, total_value, cash,
+                long_market_value, short_market_value, source
+            ) VALUES (?, ?, ?, ?, ?, ?, 'reconstructed')
+            ON CONFLICT(snapshot_at, account_id) DO NOTHING
+            """,
+            (f"{D}T21:00:00+00:00", account_id, mv + cash, cash, None, None),
+        )
+
+    # Validation: forward replay should land on today's known holdings & cash.
+    replayed_units: dict[str, float] = {}
+    for a in acts:
+        if a["symbol"] and a["type"] not in _OPTION_MA_TYPES:
+            replayed_units[a["symbol"]] = replayed_units.get(a["symbol"], 0.0) + a["adj_units"]
+    holdings_residual = {}
+    for sym in set(current_positions) | set(replayed_units):
+        diff = current_positions.get(sym, 0.0) - replayed_units.get(sym, 0.0)
+        if abs(diff) > 0.01:
+            holdings_residual[sym] = round(diff, 4)
+
+    return {
+        "status": "ok",
+        "account_id": account_id,
+        "start_date": start_date,
+        "end_date": end_date,
+        "days_written": len(all_dates),
+        "activities": n,
+        "unpriceable_symbols": unpriceable,
+        "skipped_option_ma": sum(1 for a in acts if a["type"] in _OPTION_MA_TYPES),
+        "holdings_residual": holdings_residual,   # should be ~empty if complete
+        "cash_residual": round(current_cash - cash, 2),  # should be ~0
+    }
