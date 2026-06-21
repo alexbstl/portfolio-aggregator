@@ -678,6 +678,61 @@ def fetch_daily_equity_series(conn, is_paper: int, days: int | None = None,
     return [{"date": r["d"], "value": r["total_value"]} for r in rows]
 
 
+def compute_twr_index(conn, series: list[dict], is_paper: int,
+                      account_id: str | None = None) -> list[float]:
+    """
+    Time-weighted return index parallel to `series` (a daily equity series from
+    fetch_daily_equity_series). Each day's return is computed net of external
+    cashflows so deposits/withdrawals don't count as performance:
+
+        r_t   = (V_t - flow_t) / V_{t-1}      (end-of-day flow convention)
+        idx_t = idx_{t-1} * r_t,  idx_0 = 1.0
+
+    Returns a list of growth factors (1.0 = flat) aligned to `series`. The
+    frontend rebases it to a chosen start date, same as any other line.
+    """
+    if not series:
+        return []
+
+    dates = [p["date"] for p in series]
+    where = "WHERE a.is_paper = ?"
+    params: list = [is_paper]
+    if account_id:
+        where += " AND act.account_id = ?"
+        params.append(account_id)
+    where += " AND date(act.trade_date) >= ? AND date(act.trade_date) <= ?"
+    params += [dates[0], dates[-1]]
+    placeholders = ",".join("?" * len(_EXTERNAL_FLOW_TYPES))
+    where += f" AND act.type IN ({placeholders})"
+    params += list(_EXTERNAL_FLOW_TYPES)
+
+    rows = conn.execute(
+        f"""
+        SELECT date(act.trade_date) AS d, COALESCE(SUM(act.amount), 0) AS flow
+        FROM activities act
+        JOIN accounts a ON a.id = act.account_id
+        {where}
+        GROUP BY date(act.trade_date)
+        """,
+        params,
+    ).fetchall()
+    flow_by_date = {r["d"]: r["flow"] for r in rows}
+
+    out: list[float] = []
+    index = 1.0
+    prev_v = None
+    for p in series:
+        v = p["value"]
+        f = flow_by_date.get(p["date"], 0.0)
+        if prev_v is not None and prev_v > 0:
+            r = (v - f) / prev_v
+            if r > 0:  # guard pathological days (full withdrawal etc.)
+                index *= r
+        out.append(index)
+        prev_v = v
+    return out
+
+
 def fetch_aligned_benchmark_series(conn, symbol: str, dates: list[str]) -> list[float | None]:
     """
     Return one close per date in `dates`, carrying the most recent prior close
@@ -706,6 +761,11 @@ def fetch_aligned_benchmark_series(conn, symbol: str, dates: list[str]) -> list[
 _OPTION_MA_TYPES = {
     "OPTIONEXPIRATION", "OPTIONASSIGNMENT", "OPTIONEXERCISE", "MA",
 }
+
+# External cashflows for time-weighted return: money entering/leaving the
+# account from outside (not internal trades, dividends, or fees, which are part
+# of performance). Used to strip deposit/withdrawal effects out of return.
+_EXTERNAL_FLOW_TYPES = ("CONTRIBUTION", "DEPOSIT", "WITHDRAWAL", "TRANSFER")
 
 # Money-market / sweep funds hold a constant $1.00 NAV but have no Yahoo price.
 # Value them at $1 instead of treating them as unpriceable (worth $0).

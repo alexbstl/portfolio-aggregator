@@ -19,6 +19,7 @@ from db import (
     init_db,
     fetch_positions_with_day_change,
     fetch_daily_equity_series,
+    compute_twr_index,
     fetch_aligned_benchmark_series,
     list_benchmarks,
     add_benchmark,
@@ -181,10 +182,12 @@ def api_performance(paper: bool = False, days: int | None = None,
             sym: fetch_aligned_benchmark_series(conn, sym, dates)
             for sym in list_benchmarks(conn)
         }
+        twr = compute_twr_index(conn, series, is_paper_flag, account)
     return {
         "dates": dates,
         "portfolio": [p["value"] for p in series],
         "benchmarks": benchmarks,
+        "twr": twr,
     }
 
 

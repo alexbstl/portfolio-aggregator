@@ -243,6 +243,7 @@
         </div>
         <div class="group" id="perf-mode">
             <button class="seg active" data-mode="pct">% Return</button>
+            <button class="seg" data-mode="twr" title="Time-weighted return — deposits/withdrawals removed">TWR</button>
             <button class="seg" data-mode="dollar">$ Value</button>
         </div>
         <div class="group" id="perf-range">
@@ -509,9 +510,9 @@
         }
 
         function perfFormatter() {
-            return perfState.mode === 'pct'
-                ? (v) => (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
-                : (v) => '$' + Math.round(v).toLocaleString();
+            return perfState.mode === 'dollar'
+                ? (v) => '$' + Math.round(v).toLocaleString()
+                : (v) => (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
         }
 
         function renderPerfChart() {
@@ -528,20 +529,25 @@
             empty.style.display = 'none';
 
             const mode = perfState.mode;
+            // TWR is rendered like a % series, but the portfolio line uses the
+            // deposit-neutral TWR index instead of raw value. Benchmarks have no
+            // cashflows, so their TWR == their price return.
+            const tmode = (mode === 'twr') ? 'pct' : mode;
+            const portSource = (mode === 'twr') ? (d.twr || d.portfolio) : d.portfolio;
             const fmt = perfFormatter();
-            const baseIdx = baseIndexFor(d.portfolio);  // shared anchor for all series
+            const baseIdx = baseIndexFor(d.portfolio);  // shared date anchor for all series
             const datasets = [];
             let ci = 0;
             datasets.push({
-                label: 'Portfolio',
-                data: transformSeries(d.portfolio, mode, d.portfolio, baseIdx),
+                label: (mode === 'twr') ? 'Portfolio (TWR)' : 'Portfolio',
+                data: transformSeries(portSource, tmode, d.portfolio, baseIdx),
                 borderColor: PERF_COLORS[ci++ % PERF_COLORS.length],
                 borderWidth: 2, pointRadius: 0, tension: 0.1, spanGaps: true,
             });
             for (const sym of Object.keys(d.benchmarks)) {
                 datasets.push({
                     label: sym,
-                    data: transformSeries(d.benchmarks[sym], mode, d.portfolio, baseIdx),
+                    data: transformSeries(d.benchmarks[sym], tmode, d.portfolio, baseIdx),
                     borderColor: PERF_COLORS[ci++ % PERF_COLORS.length],
                     borderWidth: 1.5, pointRadius: 0, tension: 0.1, spanGaps: true,
                     borderDash: [4, 3],
