@@ -718,15 +718,22 @@ def compute_twr_index(conn, series: list[dict], is_paper: int,
     ).fetchall()
     flow_by_date = {r["d"]: r["flow"] for r in rows}
 
+    # Don't accumulate return until the account is meaningfully funded. TWR's
+    # daily ratio blows up when the prior day's value is tiny (early reconstructed
+    # history can be a few dollars), and a single near-zero ratio permanently
+    # collapses the cumulative index. Floor at 1% of the account's peak value.
+    peak = max((p["value"] for p in series if p["value"] is not None), default=0.0)
+    floor = max(peak * 0.01, 1.0)
+
     out: list[float] = []
     index = 1.0
     prev_v = None
     for p in series:
         v = p["value"]
         f = flow_by_date.get(p["date"], 0.0)
-        if prev_v is not None and prev_v > 0:
+        if prev_v is not None and prev_v >= floor:
             r = (v - f) / prev_v
-            if r > 0:  # guard pathological days (full withdrawal etc.)
+            if r > 0:  # guard pathological days (full withdrawal / data error)
                 index *= r
         out.append(index)
         prev_v = v
