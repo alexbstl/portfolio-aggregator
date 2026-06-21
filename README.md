@@ -8,7 +8,7 @@ Aggregates brokerage accounts and positions via [SnapTrade](https://snaptrade.co
 - **Auto-sync** every 15 minutes via APScheduler, plus manual force-refresh
 - **External price feed** — [yfinance](https://github.com/ranaroussi/yfinance) is the primary source for current price and previous close; broker prices are the fallback when Yahoo can't resolve a symbol. Fixes stale broker quotes (e.g. Schwab) and gives a true previous-close basis for day change.
 - **Daily change tracking** — day change $ and % computed at read time against the previous close (with a 9:29 ET pre-market snapshot as fallback). Direction-adjusted, so a profitable short reads positive.
-- **Performance chart** — equity curve with a %-return / $-value toggle, range buttons + a custom start date, a per-account view, and configurable benchmark overlays (add any ticker, e.g. SPY/QQQ).
+- **Performance chart** — equity curve with %-return / TWR / $-value modes, range buttons + a custom start date, a per-account view, and configurable benchmark overlays (add any ticker, e.g. SPY/QQQ). TWR (time-weighted return) strips deposits/withdrawals out of the return so it's comparable to a benchmark.
 - **Historical backfill** — reconstructs the equity curve for the period *before* the app existed from SnapTrade transaction history (see [Historical backfill & maintenance](#historical-backfill--maintenance)).
 - **Historical snapshots** — position and account-level snapshots stored for the equity curve, tagged `live` vs `reconstructed`.
 - **Paper/real separation** — separate dashboard views at `/` and `/paper`
