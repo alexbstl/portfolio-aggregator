@@ -19,6 +19,14 @@ COPY app/ ./app/
 RUN mkdir -p /data
 ENV DATABASE_PATH=/data/portfolio.db
 
+# Run as a non-root user (defense in depth). appuser owns /app and /data.
+# NOTE: if the host ./data bind was created by a previous root container, it's
+# owned by root and this user can't write the DB — chown it to 10001 on the
+# host first:  sudo chown -R 10001:10001 /opt/portfolio/data
+RUN useradd --create-home --uid 10001 appuser \
+    && chown -R appuser:appuser /app /data
+USER appuser
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \

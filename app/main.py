@@ -3,13 +3,15 @@ FastAPI webapp + background sync scheduler.
 Run with: uvicorn app.main:app --reload
 """
 import os
+import hmac
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import BaseHTTPMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
@@ -33,6 +35,41 @@ SYNC_INTERVAL_MINUTES = int(os.environ.get("SYNC_INTERVAL_MINUTES", "15"))
 
 scheduler = BackgroundScheduler(timezone="UTC")
 templates = Jinja2Templates(directory="app/templates")
+
+# ---------- auth ----------
+# Single shared secret. The 127.0.0.1 bind + Caddy/Tailscale is the network
+# gate; this is the application-layer second gate. Browsers authenticate once
+# via /login (sets an HttpOnly cookie); API/device clients send X-App-Token.
+APP_TOKEN = os.environ.get("APP_TOKEN", "")
+# Set true when always fronted by HTTPS (Caddy); leave false for plain-HTTP LAN
+# / Tailscale access so the login cookie is still sent.
+APP_COOKIE_SECURE = os.environ.get("APP_COOKIE_SECURE", "false").lower() == "true"
+# Reachable without the token. /health stays open for the Docker healthcheck;
+# /login must be open so the user can authenticate.
+_OPEN_PATHS = {"/health", "/login"}
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path in _OPEN_PATHS:
+            return await call_next(request)
+        if not APP_TOKEN:
+            # Fail closed: a missing token must not silently run wide open.
+            return JSONResponse(
+                {"error": "server auth not configured (set APP_TOKEN)"},
+                status_code=503,
+            )
+        presented = (
+            request.headers.get("X-App-Token")
+            or request.cookies.get("app_token")
+            or ""
+        )
+        if not hmac.compare_digest(presented, APP_TOKEN):  # constant-time
+            accepts_html = "text/html" in request.headers.get("accept", "")
+            if accepts_html and request.method == "GET":
+                return RedirectResponse("/login", status_code=303)
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
 
 # Lock ensures only one sync runs at a time, regardless of source (manual or scheduled).
 _sync_lock = threading.Lock()
@@ -117,6 +154,50 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(AuthMiddleware)
+
+
+# ---------- auth routes ----------
+
+_LOGIN_HTML = """<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1"><title>Portfolio — Sign in</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:320px;margin:6rem auto;padding:0 1rem;color:#222}
+input,button{font-size:1rem;padding:.55rem;width:100%;box-sizing:border-box;margin-top:.6rem}
+button{background:#222;color:#fff;border:none;border-radius:4px;cursor:pointer}
+.err{color:#c0392b;font-size:.9rem;min-height:1.2em}</style></head><body>
+<h2>Portfolio</h2>
+<form onsubmit="return doLogin(event)">
+<input id=t type=password placeholder="Access token" autofocus autocomplete=current-password>
+<button type=submit>Sign in</button>
+</form><p id=err class=err></p>
+<script>
+async function doLogin(e){e.preventDefault();
+  const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({token:document.getElementById('t').value})});
+  if(r.ok){location.href='/';}
+  else{document.getElementById('err').textContent=r.status===503?'Server auth not configured.':'Incorrect token.';}
+  return false;}
+</script></body></html>"""
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form():
+    return _LOGIN_HTML
+
+
+@app.post("/login")
+def login_submit(payload: dict):
+    if not APP_TOKEN:
+        return JSONResponse({"error": "server auth not configured"}, status_code=503)
+    if not hmac.compare_digest(payload.get("token") or "", APP_TOKEN):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(
+        "app_token", APP_TOKEN,
+        httponly=True, samesite="strict", secure=APP_COOKIE_SECURE,
+        max_age=60 * 60 * 24 * 30, path="/",
+    )
+    return resp
 
 
 # ---------- JSON API ----------

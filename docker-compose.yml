@@ -10,7 +10,16 @@ services:
     volumes:
       - ./data:/data
     env_file:
-      - .env
+      - .env                     # must include APP_TOKEN (app fails closed without it)
     environment:
       - DATABASE_PATH=/data/portfolio.db
       - SYNC_INTERVAL_MINUTES=15
+    # Defense in depth. The image runs as non-root (uid 10001); ensure the
+    # host ./data dir is owned by 10001 (see Dockerfile note).
+    security_opt:
+      - no-new-privileges:true
+    # Optional further hardening — enable once verified. read_only requires the
+    # yfinance cache to have a writable home; if it errors, mount a tmpfs for it.
+    # read_only: true
+    # tmpfs:
+    #   - /tmp

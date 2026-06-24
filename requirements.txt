@@ -1,7 +1,7 @@
-fastapi
-uvicorn[standard]
-jinja2
-python-dotenv
-apscheduler
-snaptrade-python-sdk
-yfinance
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+jinja2==3.1.6
+python-dotenv==1.2.2
+apscheduler==3.11.2
+snaptrade-python-sdk==11.0.187
+yfinance==1.3.0

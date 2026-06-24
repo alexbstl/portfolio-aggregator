@@ -13,12 +13,16 @@ Aggregates brokerage accounts and positions via [SnapTrade](https://snaptrade.co
 - **Historical snapshots** — position and account-level snapshots stored for the equity curve, tagged `live` vs `reconstructed`.
 - **Paper/real separation** — separate dashboard views at `/` and `/paper`
 - **Locally-computed account totals** — `total_value` is recomputed each sync as `cash + Σ position market_value` rather than trusting the broker-reported total (works around a Robinhood undercounting bug). Equities + cash only; options aren't synced yet, so options-holding accounts would underreport.
+- **Authentication** — a shared-secret gate on every route (browser logs in once at `/login`; API/device clients send an `X-App-Token` header). The app **fails closed** (HTTP 503) if `APP_TOKEN` is unset, so it can't silently run unauthenticated. See [Security](#security).
 
 ## Quickstart
 
 ```bash
 # 1. Set up env
 cp .env.example .env   # fill in SNAPTRADE_CLIENT_ID, SNAPTRADE_CONSUMER_KEY, SNAPTRADE_USER_ID, SNAPTRADE_USER_SECRET
+
+# also set APP_TOKEN (required — the app refuses to serve without it). Generate one:
+python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 # 2. Install deps
 pip install -r requirements.txt
@@ -27,7 +31,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-Dashboard at `http://localhost:8000`.
+Dashboard at `http://localhost:8000` — you'll be sent to `/login`; enter the `APP_TOKEN` once (it's stored in an HttpOnly cookie). API/device clients send it as the `X-App-Token` header instead.
 
 ## Docker
 
@@ -47,7 +51,13 @@ docker compose up -d --build --force-recreate
 
 Data persists in `./data/portfolio.db` (mounted as a volume). Binds to `127.0.0.1:8000` only — put behind Caddy/Tailscale/nginx for remote access.
 
-The container includes a health check at `/health` (30s interval).
+`.env` must include `APP_TOKEN` (compose loads it via `env_file`) — without it the app returns 503 on every route. The container runs as a **non-root user (uid 10001)**; if your host `./data` dir was created by an earlier root container, chown it once so the new user can write:
+
+```bash
+sudo chown -R 10001:10001 ./data    # or /opt/portfolio/data
+```
+
+The container includes a health check at `/health` (30s interval, stays unauthenticated).
 
 ### Portainer
 
@@ -63,11 +73,25 @@ docker build -t portfolio-aggregator:latest .
 
 The SQLite DB lives on the mounted volume and survives rebuilds — see the [runbook](#full-cleanup--backfill-runbook-server--docker) for backfill/cleanup after deploying.
 
+## Security
+
+Designed for a single-user homelab (container bound to `127.0.0.1`, fronted by Caddy/Tailscale). Hardening in place:
+
+- **App-layer auth** — every route requires `APP_TOKEN` (header `X-App-Token`, or the cookie set by `/login`). Constant-time comparison; **fails closed** if the token is unset. `/health` and `/login` are the only open paths. This is a second gate behind the network layer — a reverse-proxy/ACL slip no longer means open access, and it closes the browser-to-localhost (DNS-rebinding) vector. If you terminate auth at Caddy instead, have it inject `X-App-Token` and you can treat `APP_TOKEN` as an internal shared secret.
+- **Pinned dependencies** — `requirements.txt` pins exact versions for reproducible builds. Bump deliberately; regenerate with hashes via `pip-compile --generate-hashes` if you want supply-chain enforcement.
+- **Non-root container** — runs as uid 10001 with `no-new-privileges`. (Optional `read_only` rootfs is stubbed in `docker-compose.yml`; enable after verifying the yfinance cache has a writable home.)
+- **No secrets in the repo** — `.env` and `data/` are gitignored; all SnapTrade calls are server-side, so broker credentials never reach the browser.
+
+Accepted risks (single-user homelab): the SQLite DB is unencrypted at rest (rely on host disk encryption); `docker logs` contains account names/totals; `register.py`/`connect.py` print secrets to the terminal (run-once, locally); the app has no TLS of its own (Caddy/Tailscale provides transport security — don't expose uvicorn directly).
+
 ## API
+
+All routes except `/health` and `/login` require the `APP_TOKEN` (header `X-App-Token` or the `/login` cookie).
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/health` | GET | Health check |
+| `/health` | GET | Health check (open) |
+| `/login` | GET / POST | Login form / submit token, sets auth cookie (open) |
 | `/api/accounts` | GET | All accounts with brokerage info |
 | `/api/positions?paper=false` | GET | Positions with day change + P&L (incl. % and effective prices) |
 | `/api/history?days=` | GET | Account value snapshots (optionally bounded to the last N days) |
