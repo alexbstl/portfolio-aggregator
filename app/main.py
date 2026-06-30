@@ -44,6 +44,12 @@ APP_TOKEN = os.environ.get("APP_TOKEN", "")
 # Set true when always fronted by HTTPS (Caddy); leave false for plain-HTTP LAN
 # / Tailscale access so the login cookie is still sent.
 APP_COOKIE_SECURE = os.environ.get("APP_COOKIE_SECURE", "false").lower() == "true"
+# Explicit opt-out: run with NO auth (e.g. when another layer already gates
+# access — Caddy basic-auth, Tailscale-only, trusted LAN). Must be set on
+# purpose; an unset APP_TOKEN still fails closed rather than disabling silently.
+AUTH_DISABLED = os.environ.get("AUTH_DISABLED", "false").lower() == "true"
+if AUTH_DISABLED:
+    print("WARNING: AUTH_DISABLED=true — the app is running with NO authentication")
 # Reachable without the token. /health stays open for the Docker healthcheck;
 # /login must be open so the user can authenticate.
 _OPEN_PATHS = {"/health", "/login"}
@@ -51,7 +57,7 @@ _OPEN_PATHS = {"/health", "/login"}
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if request.url.path in _OPEN_PATHS:
+        if AUTH_DISABLED or request.url.path in _OPEN_PATHS:
             return await call_next(request)
         if not APP_TOKEN:
             # Fail closed: a missing token must not silently run wide open.
