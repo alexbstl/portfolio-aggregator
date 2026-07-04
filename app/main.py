@@ -16,11 +16,13 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
+import analytics
 from db import (
     db,
     init_db,
     fetch_positions_with_day_change,
     fetch_daily_equity_series,
+    fetch_external_flows,
     compute_twr_index,
     fetch_aligned_benchmark_series,
     list_benchmarks,
@@ -275,6 +277,73 @@ def api_performance(paper: bool = False, days: int | None = None,
         "portfolio": [p["value"] for p in series],
         "benchmarks": benchmarks,
         "twr": twr,
+    }
+
+
+@app.get("/api/analytics")
+def api_analytics(paper: bool = False, days: int | None = None,
+                  start: str | None = None, risk_free: float = 0.0):
+    """
+    Risk & performance metrics for every subject: the aggregate portfolio, each
+    account (sub-portfolio), and each benchmark standalone. Portfolio subjects
+    also get benchmark-relative metrics (beta/alpha/etc.) vs each benchmark.
+    All math lives in analytics.py; this only assembles the return series.
+    `risk_free` is an annual rate (e.g. 0.04). `start` (YYYY-MM-DD) clips the
+    window; risk stats default to live+reconstructed but respect that clip.
+    """
+    is_paper_flag = 1 if paper else 0
+    subjects: dict = {}
+
+    with db() as conn:
+        benchmarks = list_benchmarks(conn)
+
+        def portfolio_subject(series, account_id):
+            dates = [p["date"] for p in series]
+            values = [p["value"] for p in series]
+            flows = fetch_external_flows(conn, dates, is_paper_flag, account_id)
+            rets = analytics.daily_returns(values, flows)
+            block = analytics.compute_metrics(rets, risk_free)
+            block["kind"] = "portfolio"
+            vs = {}
+            for sym in benchmarks:
+                closes = fetch_aligned_benchmark_series(conn, sym, dates)
+                brets = analytics.simple_returns(closes)
+                vs[sym] = analytics.compute_vs_benchmark(rets, brets, risk_free)
+            block["vs_benchmark"] = vs
+            return block
+
+        # Aggregate portfolio (defines the window used for standalone benchmarks)
+        agg = fetch_daily_equity_series(conn, is_paper_flag, days, start, None)
+        agg_dates = [p["date"] for p in agg]
+        if len(agg) >= 2:
+            subjects["Portfolio"] = portfolio_subject(agg, None)
+
+        # Each account = a sub-portfolio (skip empty / all-zero accounts)
+        accts = conn.execute(
+            "SELECT id, name FROM accounts WHERE is_paper = ? ORDER BY name",
+            (is_paper_flag,),
+        ).fetchall()
+        for a in accts:
+            s = fetch_daily_equity_series(conn, is_paper_flag, days, start, a["id"])
+            if len(s) >= 2 and max((p["value"] or 0) for p in s) > 0:
+                subjects[a["name"] or a["id"]] = portfolio_subject(s, a["id"])
+
+        # Each benchmark standalone, over the aggregate window
+        for sym in benchmarks:
+            closes = fetch_aligned_benchmark_series(conn, sym, agg_dates)
+            brets = analytics.simple_returns(closes)
+            block = analytics.compute_metrics(brets, risk_free)
+            block["kind"] = "benchmark"
+            subjects[sym] = block
+
+    return {
+        "window": {
+            "start": agg_dates[0] if agg_dates else None,
+            "end": agg_dates[-1] if agg_dates else None,
+            "n": len(agg_dates),
+        },
+        "risk_free": risk_free,
+        "subjects": subjects,
     }
 
 

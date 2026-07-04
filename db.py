@@ -12,6 +12,8 @@ from pathlib import Path
 import os
 import yfinance as yf
 
+import analytics
+
 DB_PATH = Path(os.environ.get("DATABASE_PATH", "./data/portfolio.db"))
 
 
@@ -678,23 +680,16 @@ def fetch_daily_equity_series(conn, is_paper: int, days: int | None = None,
     return [{"date": r["d"], "value": r["total_value"]} for r in rows]
 
 
-def compute_twr_index(conn, series: list[dict], is_paper: int,
-                      account_id: str | None = None) -> list[float]:
+def fetch_external_flows(conn, dates: list[str], is_paper: int,
+                         account_id: str | None = None) -> list[float]:
     """
-    Time-weighted return index parallel to `series` (a daily equity series from
-    fetch_daily_equity_series). Each day's return is computed net of external
-    cashflows so deposits/withdrawals don't count as performance:
-
-        r_t   = (V_t - flow_t) / V_{t-1}      (end-of-day flow convention)
-        idx_t = idx_{t-1} * r_t,  idx_0 = 1.0
-
-    Returns a list of growth factors (1.0 = flat) aligned to `series`. The
-    frontend rebases it to a chosen start date, same as any other line.
+    Net external cashflow per day (CONTRIBUTION / DEPOSIT / WITHDRAWAL / TRANSFER),
+    aligned to `dates` (0.0 where none). Used to flow-strip returns so deposits /
+    withdrawals don't count as performance — shared by the TWR curve and the
+    risk analytics.
     """
-    if not series:
+    if not dates:
         return []
-
-    dates = [p["date"] for p in series]
     where = "WHERE a.is_paper = ?"
     params: list = [is_paper]
     if account_id:
@@ -716,28 +711,25 @@ def compute_twr_index(conn, series: list[dict], is_paper: int,
         """,
         params,
     ).fetchall()
-    flow_by_date = {r["d"]: r["flow"] for r in rows}
+    fbd = {r["d"]: r["flow"] for r in rows}
+    return [fbd.get(d, 0.0) for d in dates]
 
-    # Don't accumulate return until the account is meaningfully funded. TWR's
-    # daily ratio blows up when the prior day's value is tiny (early reconstructed
-    # history can be a few dollars), and a single near-zero ratio permanently
-    # collapses the cumulative index. Floor at 1% of the account's peak value.
-    peak = max((p["value"] for p in series if p["value"] is not None), default=0.0)
-    floor = max(peak * 0.01, 1.0)
 
-    out: list[float] = []
-    index = 1.0
-    prev_v = None
-    for p in series:
-        v = p["value"]
-        f = flow_by_date.get(p["date"], 0.0)
-        if prev_v is not None and prev_v >= floor:
-            r = (v - f) / prev_v
-            if r > 0:  # guard pathological days (full withdrawal / data error)
-                index *= r
-        out.append(index)
-        prev_v = v
-    return out
+def compute_twr_index(conn, series: list[dict], is_paper: int,
+                      account_id: str | None = None) -> list[float]:
+    """
+    Time-weighted return index parallel to `series` (a daily equity series from
+    fetch_daily_equity_series): flow-stripped daily returns compounded into a
+    growth index (1.0 = flat). The math lives in analytics.py; this only fetches
+    the flows and delegates.
+    """
+    if not series:
+        return []
+    dates = [p["date"] for p in series]
+    values = [p["value"] for p in series]
+    flows = fetch_external_flows(conn, dates, is_paper, account_id)
+    returns = analytics.daily_returns(values, flows)
+    return [float(x) for x in analytics.twr_index(returns)]
 
 
 def fetch_aligned_benchmark_series(conn, symbol: str, dates: list[str]) -> list[float | None]:

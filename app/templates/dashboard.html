@@ -269,6 +269,39 @@
         No snapshot history yet — the equity curve fills in as syncs accumulate.
     </div>
 
+    <h2>Risk &amp; Performance</h2>
+    <div class="perf-controls">
+        <label style="color:#666;">Risk-free (annual %)</label>
+        <input id="rf-input" type="number" step="0.5" value="4" style="width:4.5rem; padding:0.3rem;">
+        <button class="seg" id="analytics-refresh">Refresh</button>
+        <span style="color:#888; font-size:0.8rem;">returns are deposit-adjusted (TWR basis); VaR/ES are 1-day losses</span>
+        <span class="perf-msg" id="analytics-msg"></span>
+    </div>
+    <div style="overflow-x:auto;">
+        <table id="analytics-table">
+            <thead><tr>
+                <th>Subject</th><th>n</th><th>Total Ret</th><th>CAGR</th><th>Vol</th>
+                <th>Sharpe</th><th>Sortino</th><th>Calmar</th><th>Max DD</th>
+                <th title="95% 1-day Value-at-Risk (Cornish-Fisher, heavy-tailed)">VaR&#8329;&#8325;</th>
+                <th title="95% 1-day Expected Shortfall (empirical / heavy-tailed)">ES&#8329;&#8325;</th>
+                <th title="99% 1-day Value-at-Risk (Cornish-Fisher, heavy-tailed)">VaR&#8329;&#8329;</th>
+                <th>Skew</th><th>Ex.Kurt</th>
+            </tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+    <h3 style="font-weight:600; font-size:1rem; margin-top:1.2rem;">vs Benchmarks</h3>
+    <div style="overflow-x:auto;">
+        <table id="vsbench-table">
+            <thead><tr>
+                <th>Subject</th><th>Benchmark</th><th>Beta</th><th>Corr</th>
+                <th>Alpha (ann)</th><th>Tracking Err</th><th>Info Ratio</th>
+                <th>Up Capture</th><th>Down Capture</th>
+            </tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
     <script>
         const IS_PAPER = {{ 'true' if is_paper_view else 'false' }};
         const ACCOUNTS = [
@@ -668,6 +701,7 @@
                     perfState.start = null;       // range and explicit start are exclusive
                     startInput.value = '';
                     loadPerformance();
+                    loadAnalytics();
                 };
             });
 
@@ -677,6 +711,7 @@
                     document.querySelectorAll('#perf-range .seg').forEach(x => x.classList.remove('active'));
                 }
                 loadPerformance();
+                loadAnalytics();
             });
             document.getElementById('perf-start-clear').onclick = () => {
                 startInput.value = '';
@@ -687,6 +722,7 @@
                 if (allBtn) allBtn.classList.add('active');
                 perfState.days = 0;
                 loadPerformance();
+                loadAnalytics();
             };
 
             document.getElementById('bench-add-btn').onclick = addBench;
@@ -697,6 +733,81 @@
 
         initPerfControls();
         loadPerformance();
+
+        // ----- Risk & performance analytics -----
+        const aPct = (v, dp = 1) => v == null ? '&mdash;' : (v >= 0 ? '+' : '') + (v * 100).toFixed(dp) + '%';
+        const aLoss = (v, dp = 1) => v == null ? '&mdash;' : '&minus;' + (v * 100).toFixed(dp) + '%';  // VaR/ES shown as a loss
+        const aNum = (v, dp = 2) => v == null ? '&mdash;' : (+v).toFixed(dp);
+        const aCls = (v) => v == null ? '' : (v >= 0 ? 'pos' : 'neg');
+
+        async function loadAnalytics() {
+            const msg = document.getElementById('analytics-msg');
+            const rf = (parseFloat(document.getElementById('rf-input').value) || 0) / 100;
+            const params = new URLSearchParams({ paper: IS_PAPER, risk_free: rf });
+            // Match the performance chart's window (start overrides range).
+            if (perfState.start) params.set('start', perfState.start);
+            else if (perfState.days) params.set('days', perfState.days);
+            msg.textContent = 'loading…';
+            let j;
+            try {
+                const r = await fetch('/api/analytics?' + params.toString());
+                if (!r.ok) throw new Error();
+                j = await r.json();
+            } catch (e) { msg.textContent = 'failed'; return; }
+            msg.textContent = '';
+
+            const subj = j.subjects || {};
+            const names = Object.keys(subj);  // Portfolio, accounts, then benchmarks (insertion order)
+            const tb = document.querySelector('#analytics-table tbody');
+            tb.innerHTML = '';
+            for (const name of names) {
+                const s = subj[name];
+                const v95 = s.var && s.var['95'] ? s.var['95'].cornish_fisher : null;
+                const e95 = s.es && s.es['95'] ? s.es['95'].historical : null;
+                const v99 = s.var && s.var['99'] ? s.var['99'].cornish_fisher : null;
+                const tr = document.createElement('tr');
+                if (s.kind === 'benchmark') tr.style.color = '#999';
+                tr.innerHTML =
+                    `<td style="text-align:left"><strong>${name}</strong>${s.kind === 'benchmark' ? ' <small>(bmk)</small>' : ''}</td>` +
+                    `<td>${s.n ?? '&mdash;'}</td>` +
+                    `<td class="${aCls(s.total_return)}">${aPct(s.total_return)}</td>` +
+                    `<td class="${aCls(s.cagr)}">${aPct(s.cagr)}</td>` +
+                    `<td>${aPct(s.ann_vol)}</td>` +
+                    `<td class="${aCls(s.sharpe)}">${aNum(s.sharpe)}</td>` +
+                    `<td class="${aCls(s.sortino)}">${aNum(s.sortino)}</td>` +
+                    `<td class="${aCls(s.calmar)}">${aNum(s.calmar)}</td>` +
+                    `<td class="neg">${aPct(s.max_drawdown)}</td>` +
+                    `<td class="neg">${aLoss(v95)}</td>` +
+                    `<td class="neg">${aLoss(e95)}</td>` +
+                    `<td class="neg">${aLoss(v99)}</td>` +
+                    `<td>${aNum(s.skew)}</td>` +
+                    `<td>${aNum(s.excess_kurtosis)}</td>`;
+                tb.appendChild(tr);
+            }
+
+            const vb = document.querySelector('#vsbench-table tbody');
+            vb.innerHTML = '';
+            for (const name of names) {
+                const s = subj[name];
+                if (s.kind !== 'portfolio' || !s.vs_benchmark) continue;
+                for (const [bsym, v] of Object.entries(s.vs_benchmark)) {
+                    if (v.beta == null) continue;
+                    const tr = document.createElement('tr');
+                    tr.innerHTML =
+                        `<td style="text-align:left">${name}</td><td>${bsym}</td>` +
+                        `<td>${aNum(v.beta)}</td><td>${aNum(v.correlation)}</td>` +
+                        `<td class="${aCls(v.alpha_annual)}">${aPct(v.alpha_annual)}</td>` +
+                        `<td>${aPct(v.tracking_error)}</td>` +
+                        `<td class="${aCls(v.information_ratio)}">${aNum(v.information_ratio)}</td>` +
+                        `<td>${aNum(v.up_capture)}</td><td>${aNum(v.down_capture)}</td>`;
+                    vb.appendChild(tr);
+                }
+            }
+        }
+
+        document.getElementById('analytics-refresh').onclick = loadAnalytics;
+        document.getElementById('rf-input').addEventListener('change', loadAnalytics);
+        loadAnalytics();
     </script>
 </body>
 </html>
