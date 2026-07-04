@@ -165,7 +165,8 @@
                 {% else %}
                 <td>&mdash;</td>
                 {% endif %}
-                <td class="broker-sync-cell" data-iso="{{ a.last_holdings_sync or '' }}">&mdash;</td>
+                <td class="broker-sync-cell" data-iso="{{ a.last_holdings_sync or '' }}"
+                    data-disabled="{{ 1 if a.connection_disabled else 0 }}">&mdash;</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -333,10 +334,20 @@
         function initBrokerSyncCells() {
             document.querySelectorAll('.broker-sync-cell').forEach(td => {
                 const iso = td.dataset.iso;
+                const disabled = td.dataset.disabled === '1';
+                td.classList.remove('sync-warn', 'sync-stale');
+                // A disabled SnapTrade connection is the authoritative "inactive"
+                // signal — flag it as needing a reconnect, keeping the last-sync
+                // time for context.
+                if (disabled) {
+                    const rel = iso ? formatRelative(iso) : '';
+                    td.innerHTML = '&#9888; Reconnect' + (rel ? ' <small>&middot; ' + rel + '</small>' : '');
+                    td.classList.add('sync-stale');
+                    return;
+                }
                 if (!iso) return;
                 const secs = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
                 td.textContent = formatRelative(iso);
-                td.classList.remove('sync-warn', 'sync-stale');
                 if (secs > 86400) td.classList.add('sync-stale');       // > 24h
                 else if (secs > 14400) td.classList.add('sync-warn');   // > 4h
             });

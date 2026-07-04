@@ -220,7 +220,8 @@ def api_accounts():
     with db() as conn:
         rows = conn.execute(
             """
-            SELECT a.*, b.display_name AS brokerage_name, b.logo_url
+            SELECT a.*, b.display_name AS brokerage_name, b.logo_url,
+                   c.disabled AS connection_disabled
             FROM accounts a
             JOIN connections c ON c.id = a.connection_id
             JOIN brokerages b ON b.id = c.brokerage_id
@@ -413,6 +414,7 @@ def _render_dashboard(request: Request, paper: bool):
             SELECT
                 a.*,
                 b.display_name AS brokerage_name,
+                c.disabled AS connection_disabled,
                 COALESCE(pos_count.n, 0) AS position_count
             FROM accounts a
             JOIN connections c ON c.id = a.connection_id
