@@ -633,20 +633,25 @@ def refresh_benchmarks(conn) -> None:
 
 def fetch_daily_equity_series(conn, is_paper: int, days: int | None = None,
                               start: str | None = None,
-                              account_id: str | None = None) -> list[dict]:
+                              account_id: str | None = None,
+                              live_only: bool = False) -> list[dict]:
     """
     One portfolio total per calendar day: for each day, take each account's last
     snapshot and sum across accounts. Accounts with no snapshot on a given day are
     simply absent from that day's sum (correct for accounts added later).
 
     `start` (YYYY-MM-DD) clips the series to that date onward and takes precedence
-    over `days`. `account_id` restricts the series to a single account.
+    over `days`. `account_id` restricts the series to a single account. `live_only`
+    excludes reconstructed (backfilled) rows so lower-fidelity history doesn't skew
+    risk stats.
     """
     where_days = ""
     params: list = [is_paper]
     if account_id:
         where_days += " AND avs.account_id = ?"
         params.append(account_id)
+    if live_only:
+        where_days += " AND avs.source = 'live'"
     if start:
         where_days += " AND date(avs.snapshot_at) >= ?"
         params.append(start)

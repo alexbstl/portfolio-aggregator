@@ -283,7 +283,8 @@ def api_performance(paper: bool = False, days: int | None = None,
 
 @app.get("/api/analytics")
 def api_analytics(paper: bool = False, days: int | None = None,
-                  start: str | None = None, risk_free: float = 0.0):
+                  start: str | None = None, risk_free: float = 0.0,
+                  live_only: bool = False):
     """
     Risk & performance metrics for every subject: the aggregate portfolio, each
     account (sub-portfolio), and each benchmark standalone. Portfolio subjects
@@ -314,7 +315,7 @@ def api_analytics(paper: bool = False, days: int | None = None,
             return block
 
         # Aggregate portfolio (defines the window used for standalone benchmarks)
-        agg = fetch_daily_equity_series(conn, is_paper_flag, days, start, None)
+        agg = fetch_daily_equity_series(conn, is_paper_flag, days, start, None, live_only)
         agg_dates = [p["date"] for p in agg]
         if len(agg) >= 2:
             subjects["Portfolio"] = portfolio_subject(agg, None)
@@ -325,7 +326,7 @@ def api_analytics(paper: bool = False, days: int | None = None,
             (is_paper_flag,),
         ).fetchall()
         for a in accts:
-            s = fetch_daily_equity_series(conn, is_paper_flag, days, start, a["id"])
+            s = fetch_daily_equity_series(conn, is_paper_flag, days, start, a["id"], live_only)
             if len(s) >= 2 and max((p["value"] or 0) for p in s) > 0:
                 subjects[a["name"] or a["id"]] = portfolio_subject(s, a["id"])
 

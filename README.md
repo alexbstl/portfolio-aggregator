@@ -9,6 +9,8 @@ Aggregates brokerage accounts and positions via [SnapTrade](https://snaptrade.co
 - **External price feed** — [yfinance](https://github.com/ranaroussi/yfinance) is the primary source for current price and previous close; broker prices are the fallback when Yahoo can't resolve a symbol. Fixes stale broker quotes (e.g. Schwab) and gives a true previous-close basis for day change.
 - **Daily change tracking** — day change $ and % computed at read time against the previous close (with a 9:29 ET pre-market snapshot as fallback). Direction-adjusted, so a profitable short reads positive.
 - **Performance chart** — equity curve with %-return / TWR / $-value modes, range buttons + a custom start date, a per-account view, and configurable benchmark overlays (add any ticker, e.g. SPY/QQQ). TWR (time-weighted return) strips deposits/withdrawals out of the return so it's comparable to a benchmark.
+- **Risk & performance analytics** — Sharpe / Sortino / Calmar, annualized vol, max drawdown, VaR & Expected Shortfall (Gaussian, Cornish-Fisher heavy-tailed, historical), skew / kurtosis, and benchmark-relative beta / alpha / correlation / capture — computed for the whole portfolio, **each account, and each benchmark**, over the chart's window, on deposit-adjusted (TWR) returns. A live-only toggle excludes reconstructed history so lower-fidelity tails don't skew the stats. Every formula lives in one file, [`analytics.py`](analytics.py).
+- **Broker-sync health** — per-account last-sync staleness (yellow > 4h, red > 24h), plus a **"Reconnect"** flag when SnapTrade reports a connection inactive (`disabled`).
 - **Historical backfill** — reconstructs the equity curve for the period *before* the app existed from SnapTrade transaction history (see [Historical backfill & maintenance](#historical-backfill--maintenance)).
 - **Historical snapshots** — position and account-level snapshots stored for the equity curve, tagged `live` vs `reconstructed`.
 - **Paper/real separation** — separate dashboard views at `/` and `/paper`
@@ -97,6 +99,7 @@ All routes except `/health` and `/login` require the `APP_TOKEN` (header `X-App-
 | `/api/positions?paper=false` | GET | Positions with day change + P&L (incl. % and effective prices) |
 | `/api/history?days=` | GET | Account value snapshots (optionally bounded to the last N days) |
 | `/api/performance?paper=&days=&start=&account=` | GET | Daily equity series + aligned benchmark series for the chart |
+| `/api/analytics?paper=&days=&start=&risk_free=&live_only=` | GET | Risk & performance metrics per subject (portfolio, each account, each benchmark) |
 | `/api/benchmarks` | GET / POST / DELETE | List / add / remove benchmark tickers (`POST {"symbol": "QQQ"}`, `DELETE /api/benchmarks/{symbol}`) |
 | `/api/sync` | POST | Trigger manual sync |
 | `/api/sync/status` | GET | Current sync state (for the dashboard's polling) |
@@ -176,6 +179,7 @@ For local (non-Docker) runs, the same scripts work from the project root with `.
 app/main.py          # FastAPI app, scheduler, routes
 app/templates/       # Jinja2 dashboard template
 db.py                # SQLite schema, helpers, queries, price feed, reconstruction
+analytics.py         # All risk/performance computations (returns, TWR, VaR/ES, ratios)
 sync_once.py         # SnapTrade sync logic + activities ingest
 backfill_history.py  # Reconstruct pre-app equity history from transactions
 clean_snapshots.py   # Remove cash-only artifact snapshots (dry-run by default)

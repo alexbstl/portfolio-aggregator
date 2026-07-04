@@ -274,8 +274,12 @@
     <div class="perf-controls">
         <label style="color:#666;">Risk-free (annual %)</label>
         <input id="rf-input" type="number" step="0.5" value="4" style="width:4.5rem; padding:0.3rem;">
+        <div class="group" id="risk-source">
+            <button class="seg active" data-live="0" title="All snapshots incl. reconstructed history">All data</button>
+            <button class="seg" data-live="1" title="Only real recorded snapshots (excludes reconstructed backfill)">Live only</button>
+        </div>
         <button class="seg" id="analytics-refresh">Refresh</button>
-        <span style="color:#888; font-size:0.8rem;">returns are deposit-adjusted (TWR basis); VaR/ES are 1-day losses</span>
+        <span style="color:#888; font-size:0.8rem;">deposit-adjusted (TWR) returns; VaR/ES are 1-day losses</span>
         <span class="perf-msg" id="analytics-msg"></span>
     </div>
     <div style="overflow-x:auto;">
@@ -283,10 +287,22 @@
             <thead><tr>
                 <th>Subject</th><th>n</th><th>Total Ret</th><th>CAGR</th><th>Vol</th>
                 <th>Sharpe</th><th>Sortino</th><th>Calmar</th><th>Max DD</th>
-                <th title="95% 1-day Value-at-Risk (Cornish-Fisher, heavy-tailed)">VaR&#8329;&#8325;</th>
-                <th title="95% 1-day Expected Shortfall (empirical / heavy-tailed)">ES&#8329;&#8325;</th>
-                <th title="99% 1-day Value-at-Risk (Cornish-Fisher, heavy-tailed)">VaR&#8329;&#8329;</th>
                 <th>Skew</th><th>Ex.Kurt</th>
+            </tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+    <h3 style="font-weight:600; font-size:1rem; margin-top:1.2rem;">Tail Risk
+        <small style="font-weight:400; color:#888;">(1-day loss &middot; G Gaussian, CF Cornish-Fisher heavy-tailed, H historical)</small>
+    </h3>
+    <div style="overflow-x:auto;">
+        <table id="tailrisk-table">
+            <thead><tr>
+                <th>Subject</th>
+                <th>VaR&#8329;&#8325; G</th><th>VaR&#8329;&#8325; CF</th><th>VaR&#8329;&#8325; H</th>
+                <th>ES&#8329;&#8325; G</th><th>ES&#8329;&#8325; H</th>
+                <th>VaR&#8329;&#8329; G</th><th>VaR&#8329;&#8329; CF</th><th>VaR&#8329;&#8329; H</th>
+                <th>ES&#8329;&#8329; G</th><th>ES&#8329;&#8329; H</th>
             </tr></thead>
             <tbody></tbody>
         </table>
@@ -751,6 +767,8 @@
         const aNum = (v, dp = 2) => v == null ? '&mdash;' : (+v).toFixed(dp);
         const aCls = (v) => v == null ? '' : (v >= 0 ? 'pos' : 'neg');
 
+        let analyticsLiveOnly = false;
+
         async function loadAnalytics() {
             const msg = document.getElementById('analytics-msg');
             const rf = (parseFloat(document.getElementById('rf-input').value) || 0) / 100;
@@ -758,6 +776,7 @@
             // Match the performance chart's window (start overrides range).
             if (perfState.start) params.set('start', perfState.start);
             else if (perfState.days) params.set('days', perfState.days);
+            if (analyticsLiveOnly) params.set('live_only', 'true');
             msg.textContent = 'loading…';
             let j;
             try {
@@ -771,11 +790,10 @@
             const names = Object.keys(subj);  // Portfolio, accounts, then benchmarks (insertion order)
             const tb = document.querySelector('#analytics-table tbody');
             tb.innerHTML = '';
+            const tail = document.querySelector('#tailrisk-table tbody');
+            tail.innerHTML = '';
             for (const name of names) {
                 const s = subj[name];
-                const v95 = s.var && s.var['95'] ? s.var['95'].cornish_fisher : null;
-                const e95 = s.es && s.es['95'] ? s.es['95'].historical : null;
-                const v99 = s.var && s.var['99'] ? s.var['99'].cornish_fisher : null;
                 const tr = document.createElement('tr');
                 if (s.kind === 'benchmark') tr.style.color = '#999';
                 tr.innerHTML =
@@ -788,12 +806,28 @@
                     `<td class="${aCls(s.sortino)}">${aNum(s.sortino)}</td>` +
                     `<td class="${aCls(s.calmar)}">${aNum(s.calmar)}</td>` +
                     `<td class="neg">${aPct(s.max_drawdown)}</td>` +
-                    `<td class="neg">${aLoss(v95)}</td>` +
-                    `<td class="neg">${aLoss(e95)}</td>` +
-                    `<td class="neg">${aLoss(v99)}</td>` +
                     `<td>${aNum(s.skew)}</td>` +
                     `<td>${aNum(s.excess_kurtosis)}</td>`;
                 tb.appendChild(tr);
+
+                // tail-risk row: all VaR/ES methods at 95 and 99
+                const V = s.var || {}, E = s.es || {};
+                const v = (o, k) => o && o[k] != null ? o[k] : null;
+                const trt = document.createElement('tr');
+                if (s.kind === 'benchmark') trt.style.color = '#999';
+                trt.innerHTML =
+                    `<td style="text-align:left">${name}</td>` +
+                    `<td class="neg">${aLoss(v(V['95'], 'gaussian'))}</td>` +
+                    `<td class="neg">${aLoss(v(V['95'], 'cornish_fisher'))}</td>` +
+                    `<td class="neg">${aLoss(v(V['95'], 'historical'))}</td>` +
+                    `<td class="neg">${aLoss(v(E['95'], 'gaussian'))}</td>` +
+                    `<td class="neg">${aLoss(v(E['95'], 'historical'))}</td>` +
+                    `<td class="neg">${aLoss(v(V['99'], 'gaussian'))}</td>` +
+                    `<td class="neg">${aLoss(v(V['99'], 'cornish_fisher'))}</td>` +
+                    `<td class="neg">${aLoss(v(V['99'], 'historical'))}</td>` +
+                    `<td class="neg">${aLoss(v(E['99'], 'gaussian'))}</td>` +
+                    `<td class="neg">${aLoss(v(E['99'], 'historical'))}</td>`;
+                tail.appendChild(trt);
             }
 
             const vb = document.querySelector('#vsbench-table tbody');
@@ -818,6 +852,14 @@
 
         document.getElementById('analytics-refresh').onclick = loadAnalytics;
         document.getElementById('rf-input').addEventListener('change', loadAnalytics);
+        document.querySelectorAll('#risk-source .seg').forEach(b => {
+            b.onclick = () => {
+                document.querySelectorAll('#risk-source .seg').forEach(x => x.classList.remove('active'));
+                b.classList.add('active');
+                analyticsLiveOnly = b.dataset.live === '1';
+                loadAnalytics();
+            };
+        });
         loadAnalytics();
     </script>
 </body>
