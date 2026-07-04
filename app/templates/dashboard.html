@@ -278,6 +278,9 @@
             <button class="seg active" data-live="0" title="All snapshots incl. reconstructed history">All data</button>
             <button class="seg" data-live="1" title="Only real recorded snapshots (excludes reconstructed backfill)">Live only</button>
         </div>
+        <label style="color:#666;">Subjects:</label>
+        <select id="subject-select" multiple size="4" style="min-width:9rem; padding:0.2rem; font-size:0.85rem;"
+                title="ctrl/⌘-click to pick which portfolios/benchmarks to show"></select>
         <button class="seg" id="analytics-refresh">Refresh</button>
         <span style="color:#888; font-size:0.8rem;">deposit-adjusted (TWR) returns; VaR/ES are 1-day losses</span>
         <span class="perf-msg" id="analytics-msg"></span>
@@ -768,6 +771,7 @@
         const aCls = (v) => v == null ? '' : (v >= 0 ? 'pos' : 'neg');
 
         let analyticsLiveOnly = false;
+        let lastAnalytics = null;
 
         async function loadAnalytics() {
             const msg = document.getElementById('analytics-msg');
@@ -786,13 +790,43 @@
             } catch (e) { msg.textContent = 'failed'; return; }
             msg.textContent = '';
 
-            const subj = j.subjects || {};
-            const names = Object.keys(subj);  // Portfolio, accounts, then benchmarks (insertion order)
+            lastAnalytics = { subj: j.subjects || {}, names: Object.keys(j.subjects || {}) };
+            populateSubjectSelect(lastAnalytics.names, lastAnalytics.subj);
+            renderAnalyticsTables();
+        }
+
+        // Populate the subject multi-select, preserving the prior selection;
+        // first time (no options yet) everything starts selected.
+        function populateSubjectSelect(names, subj) {
+            const sel = document.getElementById('subject-select');
+            const prev = new Set(Array.from(sel.selectedOptions).map(o => o.value));
+            const hadOptions = sel.options.length > 0;
+            sel.innerHTML = '';
+            for (const name of names) {
+                const o = document.createElement('option');
+                o.value = name;
+                o.textContent = subj[name].kind === 'benchmark' ? name + ' (bmk)' : name;
+                o.selected = hadOptions ? prev.has(name) : true;
+                sel.appendChild(o);
+            }
+        }
+
+        // Render all three tables, filtered to the selected subjects. For the
+        // vs-benchmarks table both the portfolio subject and the benchmark must
+        // be selected. No selection = show everything.
+        function renderAnalyticsTables() {
+            if (!lastAnalytics) return;
+            const { subj, names } = lastAnalytics;
+            const sel = document.getElementById('subject-select');
+            const chosen = new Set(Array.from(sel.selectedOptions).map(o => o.value));
+            const show = (name) => chosen.size === 0 || chosen.has(name);
+
             const tb = document.querySelector('#analytics-table tbody');
             tb.innerHTML = '';
             const tail = document.querySelector('#tailrisk-table tbody');
             tail.innerHTML = '';
             for (const name of names) {
+                if (!show(name)) continue;
                 const s = subj[name];
                 const tr = document.createElement('tr');
                 if (s.kind === 'benchmark') tr.style.color = '#999';
@@ -810,7 +844,6 @@
                     `<td>${aNum(s.excess_kurtosis)}</td>`;
                 tb.appendChild(tr);
 
-                // tail-risk row: all VaR/ES methods at 95 and 99
                 const V = s.var || {}, E = s.es || {};
                 const v = (o, k) => o && o[k] != null ? o[k] : null;
                 const trt = document.createElement('tr');
@@ -833,10 +866,11 @@
             const vb = document.querySelector('#vsbench-table tbody');
             vb.innerHTML = '';
             for (const name of names) {
+                if (!show(name)) continue;
                 const s = subj[name];
                 if (s.kind !== 'portfolio' || !s.vs_benchmark) continue;
                 for (const [bsym, v] of Object.entries(s.vs_benchmark)) {
-                    if (v.beta == null) continue;
+                    if (v.beta == null || !show(bsym)) continue;
                     const tr = document.createElement('tr');
                     tr.innerHTML =
                         `<td style="text-align:left">${name}</td><td>${bsym}</td>` +
@@ -852,6 +886,7 @@
 
         document.getElementById('analytics-refresh').onclick = loadAnalytics;
         document.getElementById('rf-input').addEventListener('change', loadAnalytics);
+        document.getElementById('subject-select').addEventListener('change', renderAnalyticsTables);
         document.querySelectorAll('#risk-source .seg').forEach(b => {
             b.onclick = () => {
                 document.querySelectorAll('#risk-source .seg').forEach(x => x.classList.remove('active'));
