@@ -1,7 +1,7 @@
 """
 All portfolio risk & performance computations, in ONE file for easy auditing.
 
-Pure functions over numpy arrays — no DB, no I/O, no app imports. The database
+Pure functions over numpy arrays (no scipy) — no DB, no I/O, no app imports. The database
 layer fetches raw daily values / benchmark closes / external cashflows and hands
 them here. Every formula is documented inline so the math can be checked
 independently of the plumbing.
@@ -20,10 +20,69 @@ Conventions
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
-from scipy import stats
 
 TRADING_DAYS = 252
+
+
+# ---------------------------------------------------------------------------
+# Distribution helpers (pure numpy / stdlib — no scipy dependency)
+# ---------------------------------------------------------------------------
+
+def _norm_pdf(z: float) -> float:
+    """Standard-normal probability density at z."""
+    return math.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
+
+
+def _norm_ppf(p: float) -> float:
+    """
+    Inverse standard-normal CDF (quantile) via Acklam's rational approximation.
+    Accurate to ~1.1e-9 over the open interval (0, 1) — plenty for VaR quantiles.
+    Replaces scipy.stats.norm.ppf.
+    """
+    if p <= 0.0:
+        return -math.inf
+    if p >= 1.0:
+        return math.inf
+    a = (-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00)
+    b = (-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+         6.680131188771972e+01, -1.328068155288572e+01)
+    c = (-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00)
+    d = (7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+         3.754408661907416e+00)
+    plow, phigh = 0.02425, 1.0 - 0.02425
+    if p < plow:
+        q = math.sqrt(-2.0 * math.log(p))
+        return (((((c[0]*q + c[1])*q + c[2])*q + c[3])*q + c[4])*q + c[5]) / \
+               ((((d[0]*q + d[1])*q + d[2])*q + d[3])*q + 1.0)
+    if p <= phigh:
+        q = p - 0.5
+        r = q * q
+        return (((((a[0]*r + a[1])*r + a[2])*r + a[3])*r + a[4])*r + a[5]) * q / \
+               (((((b[0]*r + b[1])*r + b[2])*r + b[3])*r + b[4])*r + 1.0)
+    q = math.sqrt(-2.0 * math.log(1.0 - p))
+    return -(((((c[0]*q + c[1])*q + c[2])*q + c[3])*q + c[4])*q + c[5]) / \
+            ((((d[0]*q + d[1])*q + d[2])*q + d[3])*q + 1.0)
+
+
+def _skew(r) -> float:
+    """Sample skewness (biased / population form, matching scipy default)."""
+    d = r - r.mean()
+    m2 = np.mean(d ** 2)
+    m3 = np.mean(d ** 3)
+    return float(m3 / m2 ** 1.5) if m2 > 0 else 0.0
+
+
+def _kurtosis(r) -> float:
+    """Excess kurtosis (Fisher; biased form, matching scipy default). 0 = normal."""
+    d = r - r.mean()
+    m2 = np.mean(d ** 2)
+    m4 = np.mean(d ** 4)
+    return float(m4 / m2 ** 2 - 3.0) if m2 > 0 else -3.0
 
 
 # ---------------------------------------------------------------------------
@@ -156,9 +215,9 @@ def compute_metrics(returns, risk_free_annual: float = 0.0,
     calmar = float(cagr / abs(max_drawdown)) if (cagr is not None and max_drawdown < 0) else None
 
     # --- distribution shape ---
-    skew = float(stats.skew(r)) if n >= 3 else None
+    skew = _skew(r) if n >= 3 else None
     # excess kurtosis (Fisher): 0 for a normal distribution
-    exkurt = float(stats.kurtosis(r, fisher=True)) if n >= 4 else None
+    exkurt = _kurtosis(r) if n >= 4 else None
 
     out.update({
         "total_return": total_return,
@@ -179,13 +238,13 @@ def compute_metrics(returns, risk_free_annual: float = 0.0,
     # --- tail risk: VaR & Expected Shortfall (1-day, positive-loss) ---
     for c in confidences:
         alpha = 1.0 - c                      # tail probability, e.g. 0.05
-        z = float(stats.norm.ppf(alpha))     # standard-normal quantile (negative)
+        z = _norm_ppf(alpha)                 # standard-normal quantile (negative)
         key = f"{int(round(c * 100))}"
 
         # (a) Gaussian / parametric
         var_gauss = -(mean + sd * z)
         # Gaussian ES: E[loss | loss > VaR] under normality
-        es_gauss = -(mean - sd * stats.norm.pdf(z) / alpha)
+        es_gauss = -(mean - sd * _norm_pdf(z) / alpha)
 
         # (b) Cornish-Fisher: adjust the normal quantile for skew (S) and excess
         # kurtosis (K), capturing fat tails / asymmetry without fitting a full
