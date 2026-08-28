@@ -71,6 +71,10 @@
         {% endif %}
     </div>
 
+    <div id="sync-issue" style="display: none; background: #fdecea; color: #b71c1c;
+        border: 1px solid #f5c6cb; border-radius: 4px; padding: 0.5rem 0.75rem;
+        font-size: 0.85rem; margin-bottom: 1rem;"></div>
+
     <div id="dashboard-content">
     <div class="summary">
         <div class="card">
@@ -461,6 +465,16 @@
             btn.disabled = disabled;
         }
 
+        function showSyncIssue(msg) {
+            const el = document.getElementById('sync-issue');
+            if (msg) {
+                el.textContent = '⚠ Sync issue: ' + msg;
+                el.style.display = 'block';
+            } else {
+                el.style.display = 'none';
+            }
+        }
+
         async function pollSyncStatus() {
             try {
                 const res = await fetch('/api/sync/status');
@@ -473,6 +487,7 @@
                 } else {
                     // Sync finished — refresh and reset button
                     await refreshDashboardContent();
+                    showSyncIssue(state.error);
                     if (state.error) {
                         setBtnState('Failed', false);
                         setTimeout(() => setBtnState(ORIGINAL_BTN_TEXT, false), 3000);
@@ -500,6 +515,7 @@
 
         // On page load, if a sync is already in progress (e.g. started by scheduler
         // or another tab), pick up polling so the UI reflects state correctly.
+        // If the last sync failed (or the server flags a stuck one), surface it.
         (async () => {
             try {
                 const res = await fetch('/api/sync/status');
@@ -508,6 +524,8 @@
                     if (state.running) {
                         setBtnState('Syncing...', true);
                         setTimeout(pollSyncStatus, SYNC_POLL_MS);
+                    } else {
+                        showSyncIssue(state.error);
                     }
                 }
             } catch (e) { /* ignore */ }

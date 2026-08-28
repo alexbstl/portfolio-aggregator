@@ -82,6 +82,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
 # Lock ensures only one sync runs at a time, regardless of source (manual or scheduled).
 _sync_lock = threading.Lock()
 
+# A sync "running" longer than this is wedged (or grinding through provider
+# throttling); the status endpoint reports it as a failure so the UI stops
+# polling and surfaces the problem. Generous: a normal sync takes well under
+# a minute, a fully throttled price refresh is budget-capped at 5.
+SYNC_STUCK_AFTER_MINUTES = 30
+
 # Sync state for the frontend to poll. Updated under _sync_state_lock.
 _sync_state_lock = threading.Lock()
 _sync_state = {
@@ -117,11 +123,14 @@ def _locked_sync(force: bool, snapshot_kind: str | None = None) -> bool:
         _set_sync_state(error=str(e))
         raise
     finally:
-        _sync_lock.release()
+        # Clear the state BEFORE releasing the lock: in the other order, a
+        # back-to-back sync could set running=True and then have it clobbered
+        # by this cleanup, leaving the UI convinced no sync is running.
         _set_sync_state(
             running=False,
             finished_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
+        _sync_lock.release()
 
 
 def _scheduled_sync():
@@ -401,7 +410,18 @@ def api_sync():
 @app.get("/api/sync/status")
 def api_sync_status():
     with _sync_state_lock:
-        return dict(_sync_state)
+        state = dict(_sync_state)
+    if state["running"] and state["started_at"]:
+        started = datetime.fromisoformat(state["started_at"])
+        age_min = (datetime.now(timezone.utc) - started).total_seconds() / 60
+        if age_min > SYNC_STUCK_AFTER_MINUTES:
+            state["running"] = False
+            state["error"] = (
+                f"sync has been running for {int(age_min)} minutes and appears "
+                f"stuck (started {state['started_at']}). Data may be stale; "
+                f"restart the app if this persists."
+            )
+    return state
 
 
 # ---------- Dashboard ----------

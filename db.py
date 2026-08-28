@@ -6,6 +6,8 @@ changes early on, just delete portfolio.db and re-sync.
 import sqlite3
 import bisect
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -433,35 +435,77 @@ def fetch_positions_with_day_change(conn, is_paper: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+# Bounds for refresh_prices. Yahoo throttling turns the per-symbol loop into
+# an hours-long retry storm without these (one wedged sync blocked the app for
+# ~23h); a bounded pass just leaves stale rows, which display already tolerates.
+PRICE_FETCH_TIMEOUT_S = 15                    # hard cap per symbol
+PRICE_REFRESH_BUDGET_S = 300                  # hard cap for the whole pass
+PRICE_REFRESH_MAX_CONSECUTIVE_FAILURES = 8    # assume throttled and bail
+
+
+def _fetch_fast_info(symbol: str):
+    fi = yf.Ticker(symbol).fast_info
+    return fi.last_price, fi.previous_close
+
+
 def refresh_prices(conn, symbols: list[str]):
     """
     Fetch current price + previous close from Yahoo Finance for each symbol
     and upsert into the `prices` table. Failures per-symbol are swallowed so
     a bad ticker doesn't abort the sync; the stale row (if any) stays in place.
+
+    The pass is bounded: each fetch runs under a hard timeout, the loop stops
+    once its total time budget is spent, and a run of consecutive failures
+    aborts early (Yahoo is throttling — the remaining symbols would fail too).
+    Skipped symbols keep their stale row / broker-price fallback.
     """
     if not symbols:
         return
     ts = now_iso()
-    for symbol in symbols:
-        try:
-            fi = yf.Ticker(symbol).fast_info
-            price = fi.last_price
-            prev_close = fi.previous_close
-        except Exception:
-            continue
-        if price is None:
-            continue
-        conn.execute(
-            """
-            INSERT INTO prices (symbol, price, prev_close, as_of)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(symbol) DO UPDATE SET
-                price      = excluded.price,
-                prev_close = excluded.prev_close,
-                as_of      = excluded.as_of
-            """,
-            (symbol, price, prev_close, ts),
-        )
+    deadline = time.monotonic() + PRICE_REFRESH_BUDGET_S
+    consecutive_failures = 0
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        for i, symbol in enumerate(symbols):
+            if time.monotonic() > deadline:
+                print(f"  price refresh: time budget spent, "
+                      f"skipping {len(symbols) - i} remaining symbol(s)")
+                break
+            if consecutive_failures >= PRICE_REFRESH_MAX_CONSECUTIVE_FAILURES:
+                print(f"  price refresh: {consecutive_failures} consecutive "
+                      f"failures (throttled?), "
+                      f"skipping {len(symbols) - i} remaining symbol(s)")
+                break
+            try:
+                future = executor.submit(_fetch_fast_info, symbol)
+                price, prev_close = future.result(timeout=PRICE_FETCH_TIMEOUT_S)
+                consecutive_failures = 0
+            except FuturesTimeoutError:
+                # The worker is wedged in a network call that ignores its own
+                # timeouts. Abandon this executor (the thread leaks until the
+                # call dies — bounded by the failure cap) and continue fresh.
+                executor.shutdown(wait=False)
+                executor = ThreadPoolExecutor(max_workers=1)
+                consecutive_failures += 1
+                continue
+            except Exception:
+                consecutive_failures += 1
+                continue
+            if price is None:
+                continue
+            conn.execute(
+                """
+                INSERT INTO prices (symbol, price, prev_close, as_of)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    price      = excluded.price,
+                    prev_close = excluded.prev_close,
+                    as_of      = excluded.as_of
+                """,
+                (symbol, price, prev_close, ts),
+            )
+    finally:
+        executor.shutdown(wait=False)
 
 
 def recompute_account_total(conn, account_id: str):

@@ -32,6 +32,28 @@ USER_ID = os.environ["SNAPTRADE_USER_ID"]
 USER_SECRET = os.environ["SNAPTRADE_USER_SECRET"]
 
 
+def _install_snaptrade_timeout(snaptrade, connect_s: float = 10, read_s: float = 60):
+    """
+    The SDK's typed wrappers don't expose per-request timeouts and its REST
+    layer defaults to no timeout at all, so one stalled connection blocks the
+    sync thread forever. Wrap the shared REST client (all tag APIs use the
+    same one) to inject a default (connect, read) timeout; calls that already
+    pass their own keep it.
+    """
+    rest = snaptrade.account_information.api_client.rest_client
+    orig_request = rest.request
+
+    def request_with_timeout(*args, **kwargs):
+        if not kwargs.get("timeout"):
+            kwargs["timeout"] = (connect_s, read_s)
+        return orig_request(*args, **kwargs)
+
+    rest.request = request_with_timeout
+
+
+_install_snaptrade_timeout(client)
+
+
 def fetch_connections():
     return client.connections.list_brokerage_authorizations(
         user_id=USER_ID, user_secret=USER_SECRET
