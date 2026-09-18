@@ -314,6 +314,48 @@ def compute_vs_benchmark(returns, benchmark_returns,
     te = float(np.std(active, ddof=1) * np.sqrt(periods))
     ir = float(np.mean(active) / np.std(active, ddof=1) * np.sqrt(periods)) if np.std(active, ddof=1) > 0 else None
 
+    # residual (non-benchmark) risk and the appraisal / beta-adjusted information
+    # ratio. Regressing r on b gives r_t = a + beta*b_t + e_t; sd(e) is the risk
+    # this ONE benchmark doesn't explain, so alpha / residual vol is return per
+    # unit of non-benchmark risk. Unlike the active IR above it doesn't charge
+    # you for merely running more market exposure (beta != 1), which inflates
+    # `active` without being a security-level bet.
+    #
+    # NB: the residual is NOT idiosyncratic risk. A single benchmark spans only
+    # the market factor, so sd(e) still contains sector tilts, size/value/
+    # momentum exposure, single-name concentration and cash drag. Reading a high
+    # ir_residual as "selection skill" would flatter a portfolio that is just
+    # long small-cap tech. Separating those needs a multi-factor model.
+    resid_vol = None
+    ir_residual = None
+    if beta is not None and n > 2:
+        intercept_d = float(np.mean(r) - beta * np.mean(b))
+        resid = r - (intercept_d + beta * b)
+        # ddof=2: the intercept and slope were both estimated from this sample
+        sd_resid = float(np.std(resid, ddof=2))
+        # A subject that just replicates the benchmark leaves a residual that is
+        # pure floating-point noise; dividing a near-zero alpha by it produces a
+        # meaningless ratio, so treat it as "no idiosyncratic risk" instead.
+        if sd_resid <= 1e-6 * float(np.std(r, ddof=1)):
+            sd_resid = 0.0
+        resid_vol = sd_resid * float(np.sqrt(periods))
+        if resid_vol > 0 and alpha is not None:
+            ir_residual = alpha / resid_vol
+
+    # Sharpe spread ("excess Sharpe"): the portfolio's Sharpe minus the
+    # benchmark's, both computed over the SAME paired days and the same rf, so
+    # the comparison isn't contaminated by days only one side has. Positive =
+    # better reward per unit of total risk than the benchmark. Note these can
+    # differ slightly from the standalone Sharpes in `compute_metrics`, which
+    # use each series' full window.
+    def _sharpe(x):
+        sd_x = float(np.std(x, ddof=1))
+        return float((float(np.mean(x)) - rf_d) / sd_x * np.sqrt(periods)) if sd_x > 0 else None
+
+    sharpe_p = _sharpe(r)
+    sharpe_b = _sharpe(b)
+    excess_sharpe = (sharpe_p - sharpe_b) if (sharpe_p is not None and sharpe_b is not None) else None
+
     # up/down capture: portfolio's avg return on the benchmark's up (down) days,
     # relative to the benchmark's own avg on those days.
     up = b > 0
@@ -327,6 +369,11 @@ def compute_vs_benchmark(returns, benchmark_returns,
         "alpha_annual": alpha,
         "tracking_error": te,
         "information_ratio": ir,
+        "residual_vol": resid_vol,
+        "ir_residual": ir_residual,
+        "sharpe_subject": sharpe_p,      # paired-day Sharpe of the subject
+        "sharpe_benchmark": sharpe_b,    # paired-day Sharpe of the benchmark
+        "excess_sharpe": excess_sharpe,
         "up_capture": up_capture,
         "down_capture": down_capture,
     })

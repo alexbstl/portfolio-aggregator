@@ -319,7 +319,11 @@
         <table id="vsbench-table">
             <thead><tr>
                 <th>Subject</th><th>Benchmark</th><th>Beta</th><th>Corr</th>
-                <th>Alpha (ann)</th><th>Tracking Err</th><th>Info Ratio</th>
+                <th>Alpha (ann)</th><th>Tracking Err</th>
+                <th title="active-return IR: mean(r &minus; bmk) / sd(r &minus; bmk), annualized">Info Ratio</th>
+                <th title="residual (non-benchmark) volatility: annualized sd of the r = a + &beta;&middot;bmk regression residual. Not pure idio risk &mdash; still holds sector/style tilts, concentration and cash drag.">Resid Vol</th>
+                <th title="appraisal ratio: Jensen alpha / residual vol &mdash; beta-adjusted, so extra market exposure doesn't count against it. Return per unit of non-benchmark risk, not a clean read on security selection.">IR (resid)</th>
+                <th title="Sharpe spread: subject Sharpe &minus; benchmark Sharpe over the same paired days">Excess Sharpe</th>
                 <th>Up Capture</th><th>Down Capture</th>
             </tr></thead>
             <tbody></tbody>
@@ -787,6 +791,9 @@
         const aLoss = (v, dp = 1) => v == null ? '&mdash;' : '&minus;' + (v * 100).toFixed(dp) + '%';  // VaR/ES shown as a loss
         const aNum = (v, dp = 2) => v == null ? '&mdash;' : (+v).toFixed(dp);
         const aCls = (v) => v == null ? '' : (v >= 0 ? 'pos' : 'neg');
+        // hover detail for the Sharpe spread: the two Sharpes it differences
+        const sharpeTip = (v) => v.excess_sharpe == null ? '' :
+            `subject ${(+v.sharpe_subject).toFixed(2)} \u2212 benchmark ${(+v.sharpe_benchmark).toFixed(2)} (paired days)`;
 
         let analyticsLiveOnly = false;
         let lastAnalytics = null;
@@ -896,6 +903,9 @@
                         `<td class="${aCls(v.alpha_annual)}">${aPct(v.alpha_annual)}</td>` +
                         `<td>${aPct(v.tracking_error)}</td>` +
                         `<td class="${aCls(v.information_ratio)}">${aNum(v.information_ratio)}</td>` +
+                        `<td>${aPct(v.residual_vol)}</td>` +
+                        `<td class="${aCls(v.ir_residual)}">${aNum(v.ir_residual)}</td>` +
+                        `<td class="${aCls(v.excess_sharpe)}" title="${sharpeTip(v)}">${aNum(v.excess_sharpe)}</td>` +
                         `<td>${aNum(v.up_capture)}</td><td>${aNum(v.down_capture)}</td>`;
                     vb.appendChild(tr);
                 }
