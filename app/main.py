@@ -4,6 +4,7 @@ Run with: uvicorn app.main:app --reload
 """
 import os
 import hmac
+import sqlite3
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -358,6 +359,19 @@ def api_analytics(paper: bool = False, days: int | None = None,
     }
 
 
+def _is_db_busy(e: Exception) -> bool:
+    """
+    True for SQLite's lock/busy timeout. WAL allows many readers but only ONE
+    writer, and `run_sync` holds its write transaction for the whole sync
+    (broker fetches + the price refresh, budget-capped at 5 min), so a write
+    from the UI can exhaust the busy timeout and raise. That is NOT a Yahoo
+    problem and must not be reported as one.
+    """
+    return isinstance(e, sqlite3.OperationalError) and (
+        "locked" in str(e).lower() or "busy" in str(e).lower()
+    )
+
+
 @app.get("/api/benchmarks")
 def api_benchmarks_list():
     with db() as conn:
@@ -374,9 +388,16 @@ def api_benchmarks_add(payload: dict):
             ok = add_benchmark(conn, symbol)
             benchmarks = list_benchmarks(conn) if ok else None
     except Exception as e:
-        # Transient Yahoo/yfinance failure (rate limit, network). Surface a
-        # clear message instead of an opaque 500 so the UI can show it.
         print(f"benchmark add error for {symbol}: {e}")
+        if _is_db_busy(e):
+            # Write contention, not a fetch failure. Name the likely holder of
+            # the lock so the message is actionable instead of misleading.
+            with _sync_state_lock:
+                syncing = _sync_state["running"]
+            why = "a sync is running" if syncing else "another write is in progress"
+            return {"error": f"database busy ({why}) — try again in a minute"}
+        # Otherwise a transient Yahoo/yfinance failure (rate limit, network).
+        # Surface a clear message instead of an opaque 500 so the UI can show it.
         return {"error": f"Yahoo fetch for '{symbol}' failed — try again"}
     if not ok:
         return {"error": f"could not resolve '{symbol}' on Yahoo Finance"}
