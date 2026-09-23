@@ -71,7 +71,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     total_value             REAL,                -- broker-reported total (source of truth)
     cash                    REAL,
     buying_power            REAL,
-    last_holdings_sync      TEXT,                -- ISO timestamp from broker
+    last_holdings_sync      TEXT,                -- broker->SnapTrade stamp; frozen on the
+                                                 -- real-time plan (no batch sync to stamp)
+    last_positions_sync     TEXT,                -- OUR last successful positions fetch
     FOREIGN KEY (connection_id) REFERENCES connections(id)
 );
 
@@ -210,6 +212,17 @@ def init_db():
                 conn.execute(
                     "ALTER TABLE account_value_snapshots ADD COLUMN source TEXT DEFAULT 'live'"
                 )
+        # Migration: per-account stamp for OUR last successful positions fetch.
+        # `last_holdings_sync` comes from SnapTrade and never advances on the
+        # real-time plan, so it can't show whether a fetch is actually landing.
+        acc = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='accounts'"
+        ).fetchone()
+        if acc:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(accounts)")}
+            if "last_positions_sync" not in cols:
+                conn.execute("ALTER TABLE accounts ADD COLUMN last_positions_sync TEXT")
+
         conn.executescript(SCHEMA)
 
 
@@ -318,6 +331,15 @@ def replace_positions(conn, account_id: str, positions: list[dict], snapshot_at:
 
     snapshot_kind: None for regular syncs, 'pre_open' for the 9:29 ET reference snapshot.
     """
+    # Reaching here means the caller got a real positions payload (it passes
+    # None on a fetch failure and skips this entirely), so stamp the account as
+    # successfully refreshed. This is the only per-account freshness signal that
+    # actually moves — see the note on last_holdings_sync in the schema.
+    conn.execute(
+        "UPDATE accounts SET last_positions_sync = ? WHERE id = ?",
+        (snapshot_at, account_id),
+    )
+
     # Wipe current state for this account so closed positions disappear
     conn.execute("DELETE FROM positions WHERE account_id = ?", (account_id,))
 

@@ -145,7 +145,7 @@
     <table>
         <thead>
             <tr>
-                <th>Account</th><th>Brokerage</th><th>Total</th><th>Cash</th><th>Buying Power</th><th>Day Change</th><th>Broker Sync</th>
+                <th>Account</th><th>Brokerage</th><th>Total</th><th>Cash</th><th>Buying Power</th><th>Day Change</th><th title="when we last successfully fetched this account's positions. Not the broker→SnapTrade stamp, which never advances on the real-time plan.">Last Updated</th>
             </tr>
         </thead>
         <tbody>
@@ -169,7 +169,7 @@
                 {% else %}
                 <td>&mdash;</td>
                 {% endif %}
-                <td class="broker-sync-cell" data-iso="{{ a.last_holdings_sync or '' }}"
+                <td class="broker-sync-cell" data-iso="{{ a.last_positions_sync or '' }}"
                     data-disabled="{{ 1 if a.connection_disabled else 0 }}">&mdash;</td>
             </tr>
             {% endfor %}
@@ -373,10 +373,13 @@
                     return;
                 }
                 if (!iso) return;
+                // Thresholds track OUR sync cadence (every 15 min), not the
+                // broker's: an hour without a successful positions fetch means
+                // ~4 syncs have failed for this account.
                 const secs = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
                 td.textContent = formatRelative(iso);
-                if (secs > 86400) td.classList.add('sync-stale');       // > 24h
-                else if (secs > 14400) td.classList.add('sync-warn');   // > 4h
+                if (secs > 21600) td.classList.add('sync-stale');      // > 6h
+                else if (secs > 3600) td.classList.add('sync-warn');   // > 1h
             });
         }
 

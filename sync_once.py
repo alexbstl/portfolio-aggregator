@@ -163,6 +163,26 @@ def prune_orphaned(conn, live_connection_ids: set[str], live_account_ids: set[st
         print(f"  pruned {n_conn} orphaned connections")
 
 
+# SnapTrade's real-time plan forbids manual refresh (403, code 1141) because the
+# data endpoints already return live data. Probing it on every forced sync just
+# burns one doomed API call per connection and buries the logs, so remember the
+# answer and re-probe once a day in case the plan changes.
+_MANUAL_REFRESH_REPROBE_S = 24 * 60 * 60
+_manual_refresh_blocked_at: float | None = None
+
+
+def _manual_refresh_unsupported(e: Exception) -> bool:
+    """True for SnapTrade's 'manual refresh not enabled on the real-time plan'."""
+    msg = str(e).lower()
+    return "1141" in msg or "manual refresh not enabled" in msg
+
+
+def _manual_refresh_worth_trying() -> bool:
+    if _manual_refresh_blocked_at is None:
+        return True
+    return (time.monotonic() - _manual_refresh_blocked_at) > _MANUAL_REFRESH_REPROBE_S
+
+
 def run_sync(force: bool = False, snapshot_kind: str | None = None):
     snapshot_at = now_iso()
     
@@ -175,7 +195,9 @@ def run_sync(force: bool = False, snapshot_kind: str | None = None):
     print("  fetching connections...")
     connections = fetch_connections()
 
-    if force and connections:
+    if force and connections and not _manual_refresh_worth_trying():
+        print("  manual refresh unavailable on this plan — skipping (re-probes daily)")
+    elif force and connections:
         print(f"  forcing broker refresh on {len(connections)} connection(s)...")
         any_refreshed = False
         for c in connections:
@@ -190,6 +212,14 @@ def run_sync(force: bool = False, snapshot_kind: str | None = None):
                 any_refreshed = True
                 print(f"    {name}: refresh requested")
             except Exception as e:
+                if _manual_refresh_unsupported(e):
+                    # Plan-level, not connection-level: the rest would fail the
+                    # same way, so stop asking and remember for a day.
+                    global _manual_refresh_blocked_at
+                    _manual_refresh_blocked_at = time.monotonic()
+                    print(f"    {name}: manual refresh not enabled on this plan "
+                          f"(real-time data) — skipping remaining connections")
+                    break
                 print(f"    {name}: refresh error {e}")
         # Only wait if a refresh was actually accepted. On a real-time SnapTrade
         # plan, manual refresh is forbidden (403/1141) and pointless — the data
