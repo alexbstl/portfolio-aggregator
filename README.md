@@ -65,12 +65,12 @@ The container includes a health check at `/health` (30s interval, stays unauthen
 
 The container will appear in Portainer automatically if Portainer is monitoring the Docker socket. For full lifecycle management through Portainer, add it as a Stack (Stacks → Add Stack) and point to the `docker-compose.yml`.
 
-To deploy a code change: pull on the server, build the image **on the same host Portainer manages**, then redeploy the stack with re-pull image + force-recreate (the `:latest` tag stays the same, so Portainer won't auto-detect the change otherwise):
+To deploy a code change: pull on the server, build the image **on the same host Portainer manages**, then redeploy the stack with **"Re-pull image" left OFF**. The stack uses `image: portfolio-aggregator:latest`, which exists only on this host, so a re-pull tries a registry and fails. The redeploy recreates the container on the freshly built local image:
 
 ```bash
 cd /opt/portfolio/source && git pull
 docker build -t portfolio-aggregator:latest .
-# Portainer → Stacks → portfolio → Update/Redeploy (re-pull + force-recreate)
+# Portainer → Stacks → portfolio → Editor → Update the stack (Re-pull image OFF)
 ```
 
 The SQLite DB lives on the mounted volume and survives rebuilds — see the [runbook](#full-cleanup--backfill-runbook-server--docker) for backfill/cleanup after deploying.
@@ -154,7 +154,7 @@ Run after deploying the latest image. Order matters: deploy → let it sync → 
 cd /opt/portfolio/source && git pull
 docker build -t portfolio-aggregator:latest .
 
-# 2. Redeploy the stack in Portainer (re-pull image + force-recreate).
+# 2. Redeploy the stack in Portainer (Update the stack, Re-pull image OFF).
 #    On start it runs the schema migration and a startup sync.
 
 # 3. Wait for the startup sync to finish (positions + cash must be current)
